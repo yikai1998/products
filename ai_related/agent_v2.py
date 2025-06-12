@@ -8,11 +8,11 @@ from openai import OpenAI
 
 
 class ChatbotGUI:
-    def __init__(self, root, key='xxx', model='gpt-3.5-turbo'):
+    def __init__(self, root, key='your-ai-key', model='gpt-3.5-turbo'):
         # Set the window title, size, and background color
         self.root = root
         self.root.title('AI Assistant Chat')
-        self.root.geometry('800x600')
+        self.root.geometry('1200x900')
         self.root.attributes('-topmost', True)
         mac.after(2000, lambda: mac.attributes('-topmost', False))
         self.root.configure(bg='#f0f0f0')  # light gray
@@ -37,12 +37,15 @@ class ChatbotGUI:
         history_frame = tk.Frame(main_frame, bg='#f0f0f0')  # light gray
         history_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # Initialize font size
+        self.font_size = 20
+
         # Chat history text area
         self.chat_history = scrolledtext.ScrolledText(
             history_frame,
             wrap=tk.WORD,  # wraps text at word boundaries
             bg='#5350e6',  # blue purple
-            font=('Arial', 10),
+            font=('Arial', self.font_size),
             borderwidth=1,
             relief='solid'
         )
@@ -58,7 +61,7 @@ class ChatbotGUI:
             input_frame,
             height=3,  # multi-line input (height=3 means 3 lines tall)
             wrap=tk.WORD,
-            font=('Arial', 10),
+            font=('Arial', self.font_size),
             borderwidth=1,
             relief='solid'
         )
@@ -67,7 +70,7 @@ class ChatbotGUI:
 
         # Create a button style
         style = ttk.Style()
-        style.configure('TButton', font=('Arial', 10))
+        style.configure('TButton', font=('Arial', self.font_size))
 
         # Send button
         self.send_button = ttk.Button(
@@ -89,7 +92,7 @@ class ChatbotGUI:
             anchor=tk.W,  # aligns text to the west (left)
             bg='#c9c56d',  # light yellow
             fg='#030303',  # black
-            font=('Arial', 8)
+            font=('Arial', 12)
         )
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)  # bottom, stretches horizontally
 
@@ -119,10 +122,10 @@ class ChatbotGUI:
             self.chat_history.insert(tk.END, f'{message}\n', 'assistant_msg')
 
         # Add tags for styling, define its style
-        self.chat_history.tag_config('user', font=('Arial', 10, 'bold'), foreground='#0000CC')
-        self.chat_history.tag_config('user_msg', font=('Arial', 10))
-        self.chat_history.tag_config('assistant', font=('Arial', 10, 'bold'), foreground='#CC0000')
-        self.chat_history.tag_config('assistant_msg', font=('Arial', 10))
+        self.chat_history.tag_config('user', font=('Arial', self.font_size, 'bold'), foreground='#0000CC')
+        self.chat_history.tag_config('user_msg', font=('Arial', self.font_size))
+        self.chat_history.tag_config('assistant', font=('Arial', self.font_size, 'bold'), foreground='#CC0000')
+        self.chat_history.tag_config('assistant_msg', font=('Arial', self.font_size))
 
         # Scroll to the bottom
         self.chat_history.see(tk.END)  # operate the scrolls to show the newest message
