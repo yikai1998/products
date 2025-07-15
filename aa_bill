@@ -5,18 +5,18 @@ import pandas as pd
 import numpy as np
 
 
-def validate_numeric_input(P):
-    if P == '':
+def validate_numeric_input(p):
+    if p == '':
         return True
-    if all(char in '0123456789.' for char in P):
-        if P.count('.') <= 1:
+    if all(char in '0123456789.' for char in p):
+        if p.count('.') <= 1:
             return True
     return False
 
 
 def add_row():
     values = [cb1.get(), cb2.var, cb3.get()]
-    if any([values[0]=='', values[1]=='', values[2]=='']):
+    if any([values[0] == '', values[1] == '', values[2] == '']):
         messagebox.showerror("Invalid Input", "Please enter valid info!")
         return 0
     tree.insert('', 'end', values=values)
@@ -85,6 +85,46 @@ def update_selection_label():
     selected_items = cb2.var
     selection_label.config(text=selected_items)
 
+
+def delete_selected():
+    selected_item = tree.selection()
+    if not selected_item:
+        messagebox.showerror("错误", "请先选择要删除的记录")
+        return
+    for item in selected_item:
+        tree.delete(item)
+
+
+def edit_selected():
+    selected_item = tree.selection()
+    if not selected_item:
+        messagebox.showerror("错误", "请先选择要编辑的记录")
+        return
+    if len(selected_item) > 1:
+        messagebox.showerror("错误", "一次只能编辑一条记录")
+        return
+
+    # 获取选中行的值
+    values = tree.item(selected_item[0], 'values')
+
+    # 填充到输入框
+    cb1.set(values[0])
+
+    # 处理参与人（多选框）
+    participants = values[1].split(', ')
+    for option, var in cb2.selected_vars.items():
+        var.set(option in participants)
+    cb2.var = values[1]
+    update_selection_label()
+
+    # 填充金额
+    cb3.delete(0, tk.END)
+    cb3.insert(0, values[2])
+
+    # 删除选中行，用户可以修改后重新添加
+    tree.delete(selected_item[0])
+
+
 # main structure of windows
 root = tk.Tk()
 root.title("AA Bill Tool")
@@ -109,7 +149,7 @@ tree.column('Column 2', width=100)
 tree.column('Column 3', width=100)
 tree.grid(row=0, column=0, sticky="nsew", padx=10, pady=10, columnspan=3, rowspan=2)
 
-people_list = ['凯逼', '薛狗', '田东']
+people_list = ['Bella', 'Cynthia', 'Emma', 'Simonr']
 
 # scroll bar
 scrollbar = ttk.Scrollbar(root, orient="vertical", command=tree.yview)
@@ -117,11 +157,11 @@ scrollbar.grid(row=0, column=3, sticky="nsew", padx=10, pady=10, rowspan=2)
 tree.config(yscrollcommand=scrollbar.set)
 
 # dropdown menu and string-box used for input
-text1 = tk.Label(root, text='付款人', font='华文新魏 13 bold').grid(row=2, column=0, sticky="nsw", padx=10, pady=10)
-text2 = tk.Label(root, text='参与人', font='华文新魏 13 bold').grid(row=2, column=1, sticky="nsw", padx=10, pady=10)
-text3 = tk.Label(root, text='金额', font='华文新魏 13 bold').grid(row=2, column=2, sticky="nsw", padx=10, pady=10)
+tk.Label(root, text='付款人', font='华文新魏 13 bold').grid(row=2, column=0, sticky="nsw", padx=10, pady=10)
+tk.Label(root, text='参与人', font='华文新魏 13 bold').grid(row=2, column=1, sticky="nsw", padx=10, pady=10)
+tk.Label(root, text='金额', font='华文新魏 13 bold').grid(row=2, column=2, sticky="nsw", padx=10, pady=10)
 cb1 = ttk.Combobox(root, values=people_list)
-cb2 = MultiSelectDropdown(parent=root,options=people_list)
+cb2 = MultiSelectDropdown(parent=root, options=people_list)
 vcmd = (root.register(validate_numeric_input), '%P')
 cb3 = tk.Entry(root, validate='key', validatecommand=vcmd)
 cb1.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
@@ -140,5 +180,14 @@ add_button.grid(row=2, column=3, sticky="nsew", padx=10, pady=10)
 calculate_button = ttk.Button(root, text="Generate Bill", command=calculate)
 calculate_button.grid(row=3, column=3, sticky="nsew", padx=10, pady=10)
 
+# edit button
+delete_button = ttk.Button(root, text="Removed Selected", command=delete_selected)
+delete_button.grid(row=4, column=3, sticky="nsew", padx=10, pady=10)
+edit_button = ttk.Button(root, text="Edit Selected", command=edit_selected)
+edit_button.grid(row=5, column=3, sticky="nsew", padx=10, pady=10)
 
+root.geometry('1200x400')
+root.attributes('-topmost', True)
+root.focus_force()  # 强制获取焦点
+root.after(5000, lambda: root.attributes('-topmost', False))  # 5秒后允许被其它窗口覆盖
 root.mainloop()
