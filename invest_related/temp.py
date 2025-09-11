@@ -27,12 +27,13 @@ def fetch_all_nav(fund_code: str):
         2. 常用技术指标计算
         计算20日均线（MA20）、120日均线（MA120）。
         计算最近10日“日增长率滑动均值”，反映短期动能状况。
+        计算近15日最高点（近15日高点）与当前净值的回撤比例（距离高点回撤比），识别阶段顶部或回撤风险。
         3. 历史分位（低估/高估判断）
         计算“低于历史价值百分比”：当前净值在基金历史中的分位（前i天有多少比例净值高于现值，位置越高越低估）。
         计算“低于过去60日的价值百分比”：近期分位，减少历史极端值干扰，增强参考性。
         4. 量化信号给出
-        根据均线排列、分位数、日增长率等多条件，逐日生成投资信号，包括：
-        上涨势头可能要结束了：大趋势多头但短期涨幅已停滞，上涨动能明显衰减，属于顶部预警信号。
+        根据均线排列、分位数、日增长率及回撤等多元条件，逐日生成投资信号，包括：
+        上涨势头可能要结束了：处于多头趋势，但短期涨幅趋缓且近20日出现不小幅度回撤，属于顶部预警信号，应谨慎操作。
         低估, 可买：多头排列、估值明显低于历史和近60天，双重低估可积极布局。
         关注, 可能还能跌：大趋势尚可但可能仍在下跌，适合谨慎关注。
         高估, 别持有：多头转弱且高估，建议回避。
@@ -74,6 +75,8 @@ def fetch_all_nav(fund_code: str):
     df["基金代码"] = fund_code
     df["日增长率"] = round(df["日增长率"] / 100, 4)
     df["日增长率滑动均值"] = df["日增长率"].rolling(10).mean()
+    df["近15日高点"] = df["单位净值"].rolling(15).max()
+    df["距离高点回撤比"] = (df["单位净值"] - df["近15日高点"]) / df["近15日高点"]
     tag = []
     for i in range(len(df)):
         price = df.loc[i, "单位净值"]
@@ -82,13 +85,14 @@ def fetch_all_nav(fund_code: str):
         p_total = df.loc[i, "低于历史价值百分比"]
         p_recent = df.loc[i, "低于过去60日的价值百分比"]
         mean_growth = df.loc[i, "日增长率滑动均值"]
-        if (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth < 0.001):
+        drawdown = df.loc[i, "距离高点回撤比"]
+        if (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth < 0.001) and (drawdown < -0.05):
             tag.append("上涨势头可能要结束了")
         elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (p_total >= 0.7) and (p_recent >= 0.85):
             tag.append("低估, 可买")
         elif (price > ma120) and (p_total >= 0.7):
             tag.append("关注, 可能还能跌")
-        elif (price < ma20 or price < ma120) and (p_total <= 0.2):
+        elif (price < ma20) and (price < ma120) and (p_total <= 0.25):
             tag.append("高估, 别持有")
         else:
             tag.append("合理区间波动")
@@ -182,7 +186,7 @@ def main():
     print(f"正在拉取基金 {fund_code} 的全部历史净值 ……")
     nav_df = fetch_all_nav(fund_code)
 
-    print(f"完成！共 {len(nav_df)} 条记录。保存至本地。")
+    print(f"完成！共 {len(nav_df)} 条记录")
     nav_df.to_csv(f"{fund_code}_nav_{datetime.datetime.now().strftime('%y%m%d')}", encoding='utf-8')
     print(nav_df)
 
