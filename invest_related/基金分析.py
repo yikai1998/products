@@ -10,16 +10,12 @@ import sys
 import numpy as np
 import datetime
 
-pd.set_option("display.max_columns", None)
-pd.set_option("display.max_rows", None)
-pd.set_option("display.width", 1000)
-
 
 def fetch_all_nav(fund_code: str):
     """
     功能: 根据基金代码拉取全部历史净值
     参数: fund_code 文本 基金代码，如 000001、161725 等，可带或不带后缀
-    返回: dataframe 
+    返回: dataframe
     介绍:
         1. 数据获取
             利用 AkShare 接口，获取指定基金的历史日净值数据，包含净值日期、单位净值、日增长率等基础字段。
@@ -140,7 +136,7 @@ def fetch_all_nav(fund_code: str):
     df["日增长率滑动均值"] = df["日增长率滑动均值"].map(lambda x: "%.5f" % x)
     df["信号标记"] = (df["信号"] != df["信号"].shift()).cumsum()  # 列整体向下移动一行, 判断变化, 标记同一信号连续出现的段落
     df["信号连续天数"] = df.groupby("信号标记").cumcount() + 1  # 统计同一段的第几天
-
+    df = df.drop(columns=["信号标记"])
     df.sort_values("净值日期", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
@@ -148,6 +144,11 @@ def fetch_all_nav(fund_code: str):
 
 
 def basic_profile(fund_code: str):
+    """
+    功能: 获取基金的基本信息（如基金名称、类别、成立时间、运作状态、基金经理等），并以友好格式整理为多行字符串，便于展示概览/打印输出。
+    参数: fund_code 文本 基金代码，如 000001、161725 等，可带或不带后缀
+    返回: str
+    """
     basic = ak.fund_individual_basic_info_xq(symbol=fund_code)  # 返回 DataFrame
     intro = ""
     for item in basic.values:
@@ -158,6 +159,11 @@ def basic_profile(fund_code: str):
 
 
 def hold_base(symbol: str):
+    """
+    功能: 获取基金最近两个年度（含今年和去年）已披露的最新季度的股票重仓持仓数据。会自动兼容 AkShare 官方接口失效时抓取东方财富原始页面，支持通用公募基金。
+    参数: fund_code 文本 基金代码，如 000001、161725 等，可带或不带后缀
+    返回: DataFrame
+    """
     now = datetime.datetime.now()
     years = [str(now.year - 1), str(now.year)]
     big = pd.DataFrame()
@@ -180,10 +186,17 @@ def hold_base(symbol: str):
     latest_q = big["std_q"].max()
     # 一次性捞出所有属于最新季度的行
     big = big[big["std_q"] == latest_q].drop(columns=["std_q"])
+    big.sort_values(by="占净值比例", inplace=True, ascending=False)
+    big.reset_index(drop=True, inplace=True)
     return big
 
 
 def manual_parse(symbol: str, year: str):
+    """
+    功能: 用于从东方财富F10（原网页）直接解析某基金某年度的全部历史持仓信息。这个函数一般作为hold_base的辅助后备方案，用于当 AkShare接口出错或字段结构不兼容时的爬虫。
+    参数: symbol 文本 基金代码，如 000001、161725 等，可带或不带后缀。year 文本 年份字符串，如 2023
+    返回: DataFrame
+    """
     url = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
     params = {"type": "jjcc", "code": symbol, "topline": 10000, "year": year, "month": "", "rt": "0.913877030254846"}
     txt = requests.get(url, params=params, timeout=10).text  # 防止脚本卡死
@@ -214,7 +227,11 @@ def manual_parse(symbol: str, year: str):
     return big
 
 
-def main():
+if __name__ == "__main__":
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.max_rows", None)
+    pd.set_option("display.width", 1000)
+    
     fund_code = input(">> 输入基金代码: ")
 
     print(f"正在拉取基金 {fund_code} 的简介 ……")
@@ -223,15 +240,13 @@ def main():
 
     print(f"正在拉取基金 {fund_code} 近两年度持仓 ……")
     holding = hold_base(fund_code)
-    print(holding)
+    print(holding[:20][["季度", "股票代码", "股票名称", "占净值比例"]])
 
     print(f"正在拉取基金 {fund_code} 的全部历史净值 ……")
     nav_df = fetch_all_nav(fund_code)
+    path = f"基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.csv"
+    print(f"完成！共 {len(nav_df)} 条记录, 保存至本地`{path}`")
+    nav_df.to_csv(path_or_buf=path, encoding="utf-8", sep="\t", index=False)
+    print(nav_df[["基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]].sort_values(ascending=False, by="净值日期").head(n=360).reset_index(drop=True))
 
-    print(f"完成！共 {len(nav_df)} 条记录")
-    nav_df.to_csv(f"基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}", encoding="utf-8", sep="\t", index=False)
-    print(nav_df[["基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]])
 
-
-if __name__ == "__main__":
-    main()
