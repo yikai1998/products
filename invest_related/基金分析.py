@@ -211,11 +211,7 @@ def fetch_all_nav(fund_code: str):
             cnt = 0
         down_days.append(cnt)
     df["连续下跌天数"] = down_days
-    df["连涨连跌标签"] = df.apply(
-        lambda row: f"连续上涨{row["连续上涨天数"]}天" if row[
-                                                              "连续上涨天数"] > 0 else f"连续下跌{row["连续下跌天数"]}天",
-        axis=1
-    )
+    df["连涨连跌标签"] = df.apply(lambda row: f"连续上涨{row["连续上涨天数"]}天" if row["连续上涨天数"] > 0 else f"连续下跌{row["连续下跌天数"]}天", axis=1)
     tag = []
 
     for i in range(len(df)):
@@ -232,24 +228,20 @@ def fetch_all_nav(fund_code: str):
         up_days = df.loc[i, "连续上涨天数"]
         down_days = df.loc[i, "连续下跌天数"]
 
-        if (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (
-                p_under_total > p_under_360d_high):
+        if (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (p_under_total > p_under_360d_high):
             tag.append("良性上涨, 可适量增持")
         elif (price > ma20) and (price > ma120) and (p_under_total <= p_under_360d_high) and (up_days >= 5):
             tag.append("高估, 不宜加仓")
         elif (price < ma20) and (price < ma120) and (p_under_total <= p_under_360d_high):
             tag.append("动力不强, 但仍高估, 观望/减仓")
-        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (
-                qdraw < -0.05) and (up_days >= 3):
+        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (qdraw < -0.05) and (up_days >= 3):
             tag.append("上涨尾声, 分批落袋")
         elif (price < ma20) and (price < ma120) and (p_under_total >= p_under_360d_low):
             tag.append("动力不强, 但低估, 可考虑分批")
-        elif (price > ma120 or p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (
-                down_days >= 3):
+        elif (price > ma120 or p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (down_days >= 3):
             tag.append("低估, 可买")
         elif panic and (p_under_total >= p_under_360d_low):
             tag.append("连跌加速, 可关注/耐心等待")
-
         else:
             tag.append("合理区间波动")
 
