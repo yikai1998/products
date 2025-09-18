@@ -19,7 +19,8 @@ import datetime
 "上涨尾声, 分批落袋"    只要一出现，再等待第1次回撤, 再等待第1次涨的那天就卖
 """
 
-def get_fund_code(path: str = "基金代码名单.txt"):
+
+def get_fund_code(path: str = "基金代码名单_持仓.txt"):
     """
     功能: 获取准备好的基金名单, 每行一个
     参数: path 文本 文件路径
@@ -30,7 +31,6 @@ def get_fund_code(path: str = "基金代码名单.txt"):
     if len(fund_code_list) == 0:
         print("基金代码名单为空")
         sys.exit(1)
-        
     return fund_code_list
 
 
@@ -135,31 +135,19 @@ def fetch_all_nav(fund_code: str):
     介绍:
         1. 数据获取
             利用 AkShare 接口，获取指定基金的历史日净值数据，包含净值日期、单位净值、日增长率等基础字段。
-        2. 指标构建与动量特征
+        2. 人工预测数据补充（可选）
+            拉取历史数据后，支持手工输入“今日预测日增长率”。系统会自动根据上一日单位净值和输入的增长率推算出今日单位净值，补全其它缺省字段，
+            并将预测行追加到数据表最后，并统一按“净值日期”升序排序。这样可纳入后续指标和信号分析，实现自动加人工混合推算。
+        3. 指标构建与动量特征
             - 计算20日均线（MA20）、120日均线（MA120），用于判断中长期趋势。
             - 计算近10日“日增长率滑动均值”，反映短期动能变化。
             - 计算季度（30日/90日）和年度（360日）最大回撤，用于风险评估。
             - 统计近阶段“连续上涨天数”“连续下跌天数”及标签，有助于刻画超买超卖及惯性走势。
             - 探测短期内“连跌恐慌”现象（如5日内多次大跌）。
-        3. 历史分位与动态估值
+        4. 历史分位与动态估值
             - 计算“低于历史价值百分比”：反映当前净值在全部历史中的相对估值水平（百分比分位）。
             - 计算“低于过去60日的价值百分比”：近两月的分位，减少历史极端值干扰，突出近期估值。
             - 动态设定高估/低估分位阈值，支持全局及窗口化判断。
-        4. 多元量化投资信号输出
-            - 信号判据融合了价格与均线关系、分位估值、短期/长期动量、回撤风险、连涨连跌状态等多维因子。
-            - 逐日自动打标以下场景（结合信号周期与累计涨跌）：
-                - 良性上涨、适量增持
-                - 高估，不宜加仓（含连续上涨过多天时的追高风险）
-                - 动力不强, 但仍高估，观望/减仓
-                - 上涨尾声，分批落袋（动能减弱且已有回撤，顶部信号）
-                - 动力不强，但低估，可考虑分批布局
-                - 低估，可买（跌深+低估分位+近期连续下跌，左侧信号）
-                - 连跌加速，可关注/耐心等待（超卖期间的反弹潜力观测）
-                - 合理区间波动（无明显偏强/偏弱状态）
-            - “连续上涨/下跌天数”与信号配合，可以辅助规避追涨杀跌情绪、改进定投策略。
-        5. 其它
-            - 支持信号分段、阶段天数等统计，利于后续分析各信号状态持续时间及周期节奏。
-            - 最终输出含历史全部关键指标与信号的DataFrame，为量化择时、估值分析以及定投、左侧配置等实战场景提供参考依据。
     """
     print(f"正在拉取基金 {fund_code} 的全部历史净值 ……")
     try:
@@ -168,8 +156,27 @@ def fetch_all_nav(fund_code: str):
         print(f"[错误] 拉取数据失败，原因：{e}")
         sys.exit()
 
-    df["基金代码"] = fund_code
     df["净值日期"] = pd.to_datetime(df["净值日期"])
+    # 获取上一日的单位净值
+    last_nav = df.sort_values("净值日期")["单位净值"].iloc[-1]
+    # 人工添加数据, 视情况
+    predict = input("请输入今天的预测日增长率(如-1=跌1%), 回车跳过: ").strip()
+    predict = float(predict)
+    if predict:
+        new_row = {
+            "净值日期": pd.to_datetime(datetime.datetime.now().date()),
+            "单位净值": round(last_nav*(1+predict/100), 4),
+            "日增长率": predict,
+        }
+        for col in df.columns:
+            if col not in new_row:
+                new_row[col] = np.nan
+        df.loc[len(df)] = new_row
+    else:
+        print("未输入今日增长率, 未添加今日预测")
+    df["基金代码"] = fund_code
+    df.sort_values("净值日期", inplace=True)
+    df.reset_index(drop=True, inplace=True)
     df["MA20"] = df["单位净值"].rolling(20).mean()
     df["MA120"] = df["单位净值"].rolling(120).mean()
     pct_list_all = [np.nan]
@@ -211,7 +218,34 @@ def fetch_all_nav(fund_code: str):
             cnt = 0
         down_days.append(cnt)
     df["连续下跌天数"] = down_days
-    df["连涨连跌标签"] = df.apply(lambda row: f"连续上涨{row["连续上涨天数"]}天" if row["连续上涨天数"] > 0 else f"连续下跌{row["连续下跌天数"]}天", axis=1)
+    df["连涨连跌标签"] = df.apply(
+        lambda row: f"连续上涨{row["连续上涨天数"]}天" if row["连续上涨天数"] > 0 else f"连续下跌{row["连续下跌天数"]}天",
+        axis=1
+    )
+
+    return df
+
+
+def nav_signal_analysis(df):
+    """
+    1. 多元量化投资信号输出
+    - 信号判据融合了价格与均线关系、分位估值、短期/长期动量、回撤风险、连涨连跌状态等多维因子。
+    - 逐日自动打标以下场景（结合信号周期与累计涨跌）：
+        - 良性上涨、适量增持
+        - 高估，不宜加仓（含连续上涨过多天时的追高风险）
+        - 动力不强, 但仍高估，观望/减仓
+        - 上涨尾声，分批落袋（动能减弱且已有回撤，顶部信号）
+        - 动力不强，但低估，可考虑分批布局
+        - 低估，可买（跌深+低估分位+近期连续下跌，左侧信号）
+        - 连跌加速，可关注/耐心等待（超卖期间的反弹潜力观测）
+        - 合理区间波动（无明显偏强/偏弱状态）
+    - “连续上涨/下跌天数”与信号配合，可以辅助规避追涨杀跌情绪、改进定投策略。
+    2. 其它
+        - 支持信号分段、阶段天数等统计，利于后续分析各信号状态持续时间及周期节奏。
+        - 最终输出含历史全部关键指标与信号的DataFrame，为量化择时、估值分析以及定投、左侧配置等实战场景提供参考依据。
+        - 保存CSV或HTML
+    """
+    df = df.copy()
     tag = []
 
     for i in range(len(df)):
@@ -228,20 +262,24 @@ def fetch_all_nav(fund_code: str):
         up_days = df.loc[i, "连续上涨天数"]
         down_days = df.loc[i, "连续下跌天数"]
 
-        if (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (p_under_total > p_under_360d_high):
+        if (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (
+                p_under_total > p_under_360d_high):
             tag.append("良性上涨, 可适量增持")
         elif (price > ma20) and (price > ma120) and (p_under_total <= p_under_360d_high) and (up_days >= 5):
             tag.append("高估, 不宜加仓")
         elif (price < ma20) and (price < ma120) and (p_under_total <= p_under_360d_high):
             tag.append("动力不强, 但仍高估, 观望/减仓")
-        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (qdraw < -0.05) and (up_days >= 3):
+        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (
+                qdraw < -0.05) and (up_days >= 3):
             tag.append("上涨尾声, 分批落袋")
         elif (price < ma20) and (price < ma120) and (p_under_total >= p_under_360d_low):
             tag.append("动力不强, 但低估, 可考虑分批")
-        elif (price > ma120 or p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (down_days >= 3):
+        elif (price > ma120 or p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (
+                down_days >= 3):
             tag.append("低估, 可买")
         elif panic and (p_under_total >= p_under_360d_low):
             tag.append("连跌加速, 可关注/耐心等待")
+
         else:
             tag.append("合理区间波动")
 
@@ -278,7 +316,7 @@ if __name__ == "__main__":
     pd.set_option("display.max_rows", None)
     pd.set_option("display.width", 1000)
 
-    code_list = get_fund_code()
+    code_list = get_fund_code(path="基金代码名单_持仓.txt")
     for fund_code in code_list:
 
         basic_intro = basic_profile(fund_code)
@@ -288,6 +326,7 @@ if __name__ == "__main__":
         print(holding[:10][["季度", "股票代码", "股票名称", "占净值比例"]])
 
         nav_df = fetch_all_nav(fund_code)
-        print(nav_df[["基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]].sort_values(ascending=False, by="净值日期").head(n=180).reset_index(drop=True))
+        nav_df_ana = nav_signal_analysis(df=nav_df)
+        print(nav_df_ana[["基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]].sort_values(ascending=False, by="净值日期").head(n=21).reset_index(drop=True))
 
         time.sleep(2)
