@@ -161,8 +161,8 @@ def fetch_all_nav(fund_code: str):
     last_nav = df.sort_values("净值日期")["单位净值"].iloc[-1]
     # 人工添加数据, 视情况
     predict = input("请输入今天的预测日增长率(如-1=跌1%), 回车跳过: ").strip()
-    predict = float(predict)
     if predict:
+        predict = float(predict)
         new_row = {
             "净值日期": pd.to_datetime(datetime.datetime.now().date()),
             "单位净值": round(last_nav*(1+predict/100), 4),
