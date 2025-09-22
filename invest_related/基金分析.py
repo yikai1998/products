@@ -13,18 +13,20 @@ import time
 
 
 """
-策略随想 2025-09-20
-"极端暴涨, 别上头买"	未持有：别买。已持有：一出现，之后回撤的第1天就卖。（此决策可以被后续其他信号覆盖）
-"极端暴跌, 准备关注"	未持有：出现的当天大概率是暴跌的，等后续的当天只要不是暴跌就买进。已持有：别卖，赌未来，原则上见好就收。
-"高估, 不宜加仓"		未持有：别买。已持有：在3天内出现至少2次后, 则之后涨的那天就卖。
-"动力不强, 但低估, 可考虑分批"	未持有：连续出现至少4天, 再等待出现至少连续2天的"合理区间波动", 则在之后跌的那天就买。已持有：反正别卖，赌未来，原则上见好就收。
-"良性上涨, 可适量增持"	未持有：在3天内出现至少2次后, 则之后跌的那天就买。（可自身迭代, 看最后的连续信号）已持有：反正别买，赌未来。
-"上涨尾声, 分批落袋"	已持有：只要一出现，再等待第1次回撤, 再等待第1次涨的那天就卖。已持有：反正别买，赌未来。
+策略 202509
 
-"连跌加速, 可关注/耐心等待"
-"低估, 可买"
-"极端暴跌, 刚开始"
-"动力不强, 但仍高估, 观望/减仓"
+“极端大涨 且 高估”	出现1次，不包含当日，后续第一天涨就卖。（可被更新替代）
+“极端大跌 且 低估”	出现的当天就买，错过就别买。
+“极端大涨（未高估）”	不动。
+”极端大跌（未低估）“	不动。
+“良性上涨”	3天内出现至少2次，可以分批，不能梭哈，赌波动，见好就收。
+“高估”		出现1次，包含当日，第一次回撤后的第一次涨就卖。（可被更新替代）
+“动力不强, 但仍高估”	不动。
+“上涨尾声”	出现1次，包含当日，再等待第1次涨的那天就卖。
+“动力不强, 但低估”	不动。
+“低估”		不动。
+“连跌加速”	不动。
+“合理波动”	不动。
 """
 
 
@@ -193,7 +195,7 @@ def fetch_all_nav(fund_code: str):
         pct = (history > df["单位净值"].iloc[i]).mean()
         pct_list_all.append(pct)
     df["低于历史价值百分比"] = pct_list_all
-    # 动态阈值：随过去 250 天滚动，从低到高排(从高估到低估)，低于历史价值百分比的第2%｜80%分位值
+    # 动态阈值：随过去xx天滚动，从低到高排(从高估到低估)，低于历史价值百分比的第2%｜80%分位值
     df["高估边界"] = df["低于历史价值百分比"].rolling(360).quantile(0.02)
     df["低估边界"] = df["低于历史价值百分比"].rolling(360).quantile(0.8)
     pct_list_60 = [None] * 60
@@ -204,7 +206,8 @@ def fetch_all_nav(fund_code: str):
     df["低于过去60日的价值百分比"] = pct_list_60
     df["日增长率"] = round(df["日增长率"] / 100, 4)
     df["日增长率滑动均值"] = df["日增长率"].rolling(10).mean()
-    df["日增长率滑动均值"] = df["日增长率滑动均值"]
+    df["日增长率极端涨幅"] = df["日增长率"].rolling(250).quantile(0.98)
+    df["日增长率极端跌幅"] = df["日增长率"].rolling(250).quantile(0.01)
     df["季度最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(30).max()) / df["单位净值"].rolling(90).max()
     df["年最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(360).max()) / df["单位净值"].rolling(360).max()
     df["连跌恐慌"] = (df["日增长率"] < -0.01).rolling(5).sum() >= 3
@@ -238,15 +241,7 @@ def nav_signal_analysis(df):
     """
     1. 多元量化投资信号输出
     - 信号判据融合了价格与均线关系、分位估值、短期/长期动量、回撤风险、连涨连跌状态等多维因子。
-    - 逐日自动打标以下场景（结合信号周期与累计涨跌）：
-        - 良性上涨、适量增持
-        - 高估，不宜加仓（含连续上涨过多天时的追高风险）
-        - 动力不强, 但仍高估，观望/减仓
-        - 上涨尾声，分批落袋（动能减弱且已有回撤，顶部信号）
-        - 动力不强，但低估，可考虑分批布局
-        - 低估，可买（跌深+低估分位+近期连续下跌，左侧信号）
-        - 连跌加速，可关注/耐心等待（超卖期间的反弹潜力观测）
-        - 合理区间波动（无明显偏强/偏弱状态）
+    - 逐日自动打标以下场景（结合信号周期与累计涨跌）
     - “连续上涨/下跌天数”与信号配合，可以辅助规避追涨杀跌情绪、改进定投策略。
     2. 其它
         - 支持信号分段、阶段天数等统计，利于后续分析各信号状态持续时间及周期节奏。
@@ -257,6 +252,9 @@ def nav_signal_analysis(df):
     tag = []
 
     for i in range(len(df)):
+        rate = df.loc[i, "日增长率"]
+        up_extreme = df.loc[i, "日增长率极端涨幅"]
+        down_extreme = df.loc[i, "日增长率极端跌幅"]
         price = df.loc[i, "单位净值"]
         ma20 = df.loc[i, "MA20"]
         ma120 = df.loc[i, "MA120"]
@@ -270,24 +268,28 @@ def nav_signal_analysis(df):
         up_days = df.loc[i, "连续上涨天数"]
         down_days = df.loc[i, "连续下跌天数"]
 
-        if (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (
-                p_under_total > p_under_360d_high):
-            tag.append("良性上涨, 可适量增持")
+        if (rate >= up_extreme) and (p_under_total <= p_under_360d_high) and (up_days >= 2):
+            tag.append("极端大涨 且 高估")  # 建议落袋
+        elif (rate <= down_extreme) and (p_under_total >= p_under_360d_low) and (down_days >= 2):
+            tag.append("极端大跌 且 低估")  # 关注机会
+        elif rate >= up_extreme:
+            tag.append("极端大涨（未高估）")  # 警惕追高
+        elif rate <= down_extreme:
+            tag.append("极端大跌（未低估）")  # 耐心观望
+        elif (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (p_under_total > p_under_360d_high):
+            tag.append("良性上涨")  # 可适量增持
         elif (price > ma20) and (price > ma120) and (p_under_total <= p_under_360d_high) and (up_days >= 5):
-            tag.append("高估, 不宜加仓")
+            tag.append("高估")  # 不宜加仓
         elif (price < ma20) and (price < ma120) and (p_under_total <= p_under_360d_high):
-            tag.append("动力不强, 但仍高估, 观望/减仓")
-        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (
-                qdraw < -0.05) and (up_days >= 3):
-            tag.append("上涨尾声, 分批落袋")
+            tag.append("动力不强, 但仍高估")  # 观望/减仓
+        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (qdraw < -0.05) and (up_days >= 3):
+            tag.append("上涨尾声")  # 分批落袋
         elif (price < ma20) and (price < ma120) and (p_under_total >= p_under_360d_low):
-            tag.append("动力不强, 但低估, 可考虑分批")
-        elif (price > ma120 or p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (
-                down_days >= 3):
-            tag.append("低估, 可买")
+            tag.append("动力不强, 但低估")  # 考虑分批买进
+        elif (price > ma120 or p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (down_days >= 3):
+            tag.append("低估")  # 可买
         elif panic and (p_under_total >= p_under_360d_low):
-            tag.append("连跌加速, 可关注/耐心等待")
-
+            tag.append("连跌加速")  # 可关注/耐心等待
         else:
             tag.append("合理区间波动")
 
