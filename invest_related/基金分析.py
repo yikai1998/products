@@ -297,7 +297,7 @@ def nav_signal_analysis(df):
     df["信号标记"] = (df["信号"] != df["信号"].shift()).cumsum()  # 列整体向下移动一行, 判断变化, 标记同一信号连续出现的段落
     df["信号连续天数"] = df.groupby("信号标记").cumcount() + 1  # 统计同一段的第几天
     df = df.drop(columns=["信号标记"])
-    df.sort_values("净值日期", inplace=True)
+    df.sort_values(by="净值日期", ascending=False, inplace=True)
     df.reset_index(drop=True, inplace=True)
     p1 = f"基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.csv"
     df.to_csv(path_or_buf=p1, encoding="utf-8", sep="\t", index=False)
