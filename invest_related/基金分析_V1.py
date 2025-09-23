@@ -175,8 +175,9 @@ def fetch_all_nav(fund_code: str):
         pct_list_all.append(pct)
     df["低于历史价值百分比"] = pct_list_all
     # 动态阈值：随过去xx天滚动，从低到高排(从高估到低估)，低于历史价值百分比的第2%｜80%分位值
-    df["高估边界"] = df["低于历史价值百分比"].rolling(360).quantile(0.02)
-    df["低估边界"] = df["低于历史价值百分比"].rolling(360).quantile(0.8)
+    rolling_window = 540 if len(df) > 540 else 360 if len(df) > 360 else 300
+    df["高估边界"] = df["低于历史价值百分比"].rolling(rolling_window).quantile(0.02)
+    df["低估边界"] = df["低于历史价值百分比"].rolling(rolling_window).quantile(0.8)
     pct_list_60 = [None] * 60
     for i in range(60, len(df)):
         history = df["单位净值"].iloc[(i - 60):i]
@@ -258,7 +259,7 @@ def nav_signal_analysis(df):
         elif (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (p_under_total > p_under_360d_high):
             tag.append("良性上涨")  # 可适量增持
         elif (price > ma20) and (price > ma120) and (p_under_total <= p_under_360d_high) and (up_days >= 5):
-            tag.append("高估")  # 不宜加仓
+            tag.append("高估")  # 卖
         elif (price < ma20) and (price < ma120) and (p_under_total <= p_under_360d_high):
             tag.append("动力不强, 但仍高估")  # 观望/减仓
         elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (qdraw < -0.05) and (up_days >= 3):
@@ -289,6 +290,18 @@ def nav_signal_analysis(df):
     <head>
         <meta charset="utf-8">
         <title>基金净值</title>
+        <style>
+            table {{
+                border-collapse: collapse; /* 合并边框，确保表格美观 */
+                width: 100%; /* 设置表格宽度 */
+            }}
+            th, td {{
+            border: 1px solid #ddd; /* 添加边框 */
+            padding: 8px; /* 设置内边距 */
+            text-align: left; /* 文本左对齐 */
+            white-space: nowrap; /* 防止文本换行 */
+            }}
+        </style>
     </head>
     <body>
     {table_html}
@@ -305,7 +318,7 @@ if __name__ == "__main__":
     pd.set_option("display.max_rows", None)
     pd.set_option("display.width", 1000)
 
-    code_list = get_fund_code(path="基金代码名单_备选.txt")
+    code_list = get_fund_code(path="基金代码名单_持仓.txt")
     for fund_code in code_list:
         print(fund_code)
         basic_intro = basic_profile(fund_code)
