@@ -12,33 +12,14 @@ import datetime
 import time
 
 
-"""
-策略 202509
-大前提：收益率一旦达到15%-20%，就要开始分批次退出。
-
-“极端大涨 且 高估”	出现1次，不包含当日，后续第一天涨就卖。（可被更新替代）
-“极端大跌 且 低估”	出现的当天就买，错过就别买。
-“极端大涨（未高估）”	不动。
-”极端大跌（未低估）“	不动。
-“良性上涨”	3天内出现至少2次，可以分批，不能梭哈，赌波动，见好就收。
-“高估”		出现1次，包含当日，第一次回撤后的第一次涨就卖。（可被更新替代）
-“动力不强, 但仍高估”	不动。
-“上涨尾声”	出现1次，包含当日，再等待第1次涨的那天就卖。（可被更新替代）
-“动力不强, 但低估”	不动。
-“低估”		不动。
-“连跌加速”	不动。
-“合理波动”	不动。
-"""
-
-
 def get_fund_code(path: str = "基金代码名单_持仓.txt"):
     """
     功能: 获取准备好的基金名单, 每行一个
     参数: path 文本 文件路径
     返回: list
     """
-    with open(file=path, mode='r', encoding='utf-8') as f:
-        fund_code_list = [line.strip() for line in f if line.strip()]
+    with open(file=path, mode="r", encoding="utf-8") as f:
+        fund_code_list = [line.strip().split()[0] for line in f if line.strip()]
     if len(fund_code_list) == 0:
         print("基金代码名单为空")
         sys.exit(1)
@@ -53,14 +34,11 @@ def basic_profile(fund_code: str):
     """
     print(f"正在拉取基金 {fund_code} 的简介 ……")
     basic = ak.fund_individual_basic_info_xq(symbol=fund_code)  # 返回 DataFrame
-    intro = ""
-    for item in basic.values:
-        item = [str(x) if pd.notna(x) else "" for x in item]
-        intro += ("\t".join(item))
-        intro += "\n"
-    p = f"基金代码{fund_code}_简介_{datetime.datetime.now().strftime('%y%m%d')}.txt"
-    with open(file=p, mode="w", encoding="utf-8") as f:
-        f.write(intro)
+    intro = {str(k): str(v) if pd.notna(v) else "" for k, v in basic.values}
+    with open(f"{intro["基金名称"]}_基金代码{fund_code}_简介_{datetime.datetime.now().strftime("%y%m%d")}.txt", "w", encoding="utf-8") as f:
+        for k, v in intro.items():
+            print(f"{k}\t{v}")
+            f.write(f"{k}\t{v}\n")
 
     return intro
 
@@ -302,9 +280,9 @@ def nav_signal_analysis(df):
     df = df.drop(columns=["信号标记"])
     df.sort_values(by="净值日期", ascending=False, inplace=True)
     df.reset_index(drop=True, inplace=True)
-    p1 = f"基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.csv"
+    p1 = f"{df["基金名称"][0]}_基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.csv"
     df.to_csv(path_or_buf=p1, encoding="utf-8", sep="\t", index=False)
-    p2 = f"基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.html"
+    p2 = f"{df["基金名称"][0]}_基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.html"
     table_html = df.to_html(index=False)
     full_html = f"""<!DOCTYPE html>
     <html>
@@ -327,17 +305,17 @@ if __name__ == "__main__":
     pd.set_option("display.max_rows", None)
     pd.set_option("display.width", 1000)
 
-    code_list = get_fund_code(path="基金代码名单_持仓.txt")
+    code_list = get_fund_code(path="基金代码名单_备选.txt")
     for fund_code in code_list:
-
+        print(fund_code)
         basic_intro = basic_profile(fund_code)
-        print(basic_intro)
 
         holding = hold_base(fund_code)
         print(holding[:10][["季度", "股票代码", "股票名称", "占净值比例"]])
 
         nav_df = fetch_all_nav(fund_code)
+        nav_df["基金名称"] = basic_intro["基金名称"]
         nav_df_ana = nav_signal_analysis(df=nav_df)
-        print(nav_df_ana[["基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]].sort_values(ascending=False, by="净值日期").head(n=21).reset_index(drop=True))
+        print(nav_df_ana[["基金名称", "基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]].sort_values(ascending=False, by="净值日期").head(n=21).reset_index(drop=True))
 
         time.sleep(2)
