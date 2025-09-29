@@ -10,6 +10,7 @@ import sys
 import numpy as np
 import datetime
 import time
+import os
 
 
 def get_fund_code(path: str = "基金代码名单_持仓.txt"):
@@ -35,15 +36,18 @@ def basic_profile(fund_code: str):
     print(f"正在拉取基金 {fund_code} 的简介 ……")
     basic = ak.fund_individual_basic_info_xq(symbol=fund_code)  # 返回 DataFrame
     intro = {str(k): str(v) if pd.notna(v) else "" for k, v in basic.values}
-    with open(f"{intro["基金名称"]}_基金代码{fund_code}_简介_{datetime.datetime.now().strftime("%y%m%d")}.txt", "w", encoding="utf-8") as f:
+    folder = f"{intro['基金名称']}_基金代码{fund_code}"
+    os.makedirs(folder, exist_ok=True)
+    filename = os.path.join(folder, f"简介_{datetime.datetime.now().strftime('%y%m%d')}.txt")
+    with open(filename, "w", encoding="utf-8") as f:
         for k, v in intro.items():
             print(f"{k}\t{v}")
             f.write(f"{k}\t{v}\n")
 
-    return intro
+    return intro, intro["基金名称"]
 
 
-def hold_base(symbol: str):
+def hold_base(symbol: str, name: str):
     """
     功能: 获取基金最近两个年度（含今年和去年）已披露的最新季度的股票重仓持仓数据。会自动兼容 AkShare 官方接口失效时抓取东方财富原始页面，支持通用公募基金。
     参数: fund_code 文本 基金代码，如 000001、161725 等，可带或不带后缀
@@ -74,8 +78,10 @@ def hold_base(symbol: str):
     big = big[big["std_q"] == latest_q].drop(columns=["std_q"])
     big.sort_values(by="占净值比例", inplace=True, ascending=False)
     big.reset_index(drop=True, inplace=True)
-    p = f"基金代码{fund_code}_最新持仓_{datetime.datetime.now().strftime('%y%m%d')}.csv"
-    big.to_csv(path_or_buf=p, encoding="utf-8", sep="\t", index=False)
+    folder = f"{name}_基金代码{fund_code}"
+    os.makedirs(folder, exist_ok=True)
+    filename = os.path.join(folder, f"最新持仓_{datetime.datetime.now().strftime('%y%m%d')}.csv")
+    big.to_csv(path_or_buf=filename, encoding="utf-8", sep="\t", index=False)
 
     return big
 
@@ -130,7 +136,7 @@ def fetch_all_nav(fund_code: str):
         3. 指标构建与动量特征
             - 计算20日均线（MA20）、120日均线（MA120），用于判断中长期趋势。
             - 计算近10日“日增长率滑动均值”，反映短期动能变化。
-            - 计算季度（30日/90日）和年度（360日）最大回撤，用于风险评估。
+            - 计算季度（30日/90日）和年度（260个交易日）最大回撤，用于风险评估。
             - 统计近阶段“连续上涨天数”“连续下跌天数”及标签，有助于刻画超买超卖及惯性走势。
             - 探测短期内“连跌恐慌”现象（如5日内多次大跌）。
         4. 历史分位与动态估值
@@ -175,9 +181,8 @@ def fetch_all_nav(fund_code: str):
         pct_list_all.append(pct)
     df["低于历史价值百分比"] = pct_list_all
     # 动态阈值：随过去xx天滚动，从低到高排(从高估到低估)，低于历史价值百分比的第2%｜80%分位值
-    rolling_window = 540 if len(df) > 540 else 360 if len(df) > 360 else 300
-    df["高估边界"] = df["低于历史价值百分比"].rolling(rolling_window).quantile(0.02)
-    df["低估边界"] = df["低于历史价值百分比"].rolling(rolling_window).quantile(0.8)
+    df["高估边界"] = df["低于历史价值百分比"].rolling(260).quantile(0.02)
+    df["低估边界"] = df["低于历史价值百分比"].rolling(260).quantile(0.8)
     pct_list_60 = [None] * 60
     for i in range(60, len(df)):
         history = df["单位净值"].iloc[(i - 60):i]
@@ -189,7 +194,7 @@ def fetch_all_nav(fund_code: str):
     df["日增长率极端涨幅"] = df["日增长率"].rolling(250).quantile(0.98)
     df["日增长率极端跌幅"] = df["日增长率"].rolling(250).quantile(0.01)
     df["季度最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(30).max()) / df["单位净值"].rolling(90).max()
-    df["年最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(360).max()) / df["单位净值"].rolling(360).max()
+    df["年最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(260).max()) / df["单位净值"].rolling(260).max()
     df["连跌恐慌"] = (df["日增长率"] < -0.01).rolling(5).sum() >= 3
     up_days = []  # 连续上涨天数
     cnt = 0
@@ -281,9 +286,11 @@ def nav_signal_analysis(df):
     df = df.drop(columns=["信号标记"])
     df.sort_values(by="净值日期", ascending=False, inplace=True)
     df.reset_index(drop=True, inplace=True)
-    p1 = f"{df["基金名称"][0]}_基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.csv"
+    folder = f"{df["基金名称"][0]}_基金代码{fund_code}"
+    os.makedirs(folder, exist_ok=True)
+    p1 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史净值_{datetime.datetime.now().strftime('%y%m%d')}.csv"
     df.to_csv(path_or_buf=p1, encoding="utf-8", sep="\t", index=False)
-    p2 = f"{df["基金名称"][0]}_基金代码{fund_code}_历史净值_{datetime.datetime.now().strftime('%y%m%d')}.html"
+    p2 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史净值_{datetime.datetime.now().strftime('%y%m%d')}.html"
     table_html = df.to_html(index=False)
     full_html = f"""<!DOCTYPE html>
     <html>
@@ -318,12 +325,28 @@ if __name__ == "__main__":
     pd.set_option("display.max_rows", None)
     pd.set_option("display.width", 1000)
 
-    code_list = get_fund_code(path="基金代码名单_持仓.txt")
+    file_map = {
+        '1': "基金代码名单_持仓.txt",
+        '2': "基金代码名单_临时.txt",
+        '3': "基金代码名单_备选.txt",
+        '4': "基金代码名单_wjx.txt",
+    }
+    for k, v in file_map.items():
+        print(f"{k}. {v.replace('.txt', '')}")
+
+    while True:
+        choice = input(">> 请输入序号 (1~4): ").strip()
+        if choice in file_map:
+            path = file_map[choice]
+            break
+        print("输入有误!")
+
+    code_list = get_fund_code(path=path)
     for fund_code in code_list:
         print(fund_code)
-        basic_intro = basic_profile(fund_code)
+        (basic_intro, fund_name) = basic_profile(fund_code)
 
-        holding = hold_base(fund_code)
+        holding = hold_base(fund_code, fund_name)
         print(holding[:10][["季度", "股票代码", "股票名称", "占净值比例"]])
 
         nav_df = fetch_all_nav(fund_code)
