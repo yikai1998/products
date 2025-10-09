@@ -177,6 +177,7 @@ def fetch_all_nav(fund_code: str):
                     if col not in new_row:
                         new_row[col] = np.nan
                 df.loc[len(df)] = new_row
+                break
             except Exception as error:
                 print(error)
                 print("请重新输入")
