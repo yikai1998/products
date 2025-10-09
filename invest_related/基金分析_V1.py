@@ -21,6 +21,7 @@ def get_fund_code(path: str = "基金代码名单_持仓.txt"):
     """
     with open(file=path, mode="r", encoding="utf-8") as f:
         fund_code_list = [line.strip().split()[0] for line in f if line.strip()]
+        print(fund_code_list)
     if len(fund_code_list) == 0:
         print("基金代码名单为空")
         sys.exit(1)
@@ -152,23 +153,33 @@ def fetch_all_nav(fund_code: str):
         sys.exit()
 
     df["净值日期"] = pd.to_datetime(df["净值日期"])
+    latest_date = df["净值日期"].max()
+    print(f"数据已拉取，最新净值日期：{latest_date.date()}")
     # 获取上一日的单位净值
     last_nav = df.sort_values("净值日期")["单位净值"].iloc[-1]
     # 人工添加数据, 视情况
-    predict = input("请输入今天的预测日增长率(如-1=跌1%), 回车跳过: ").strip()
-    if predict:
-        predict = float(predict)
-        new_row = {
-            "净值日期": pd.to_datetime(datetime.datetime.now().date()),
-            "单位净值": round(last_nav*(1+predict/100), 4),
-            "日增长率": predict,
-        }
-        for col in df.columns:
-            if col not in new_row:
-                new_row[col] = np.nan
-        df.loc[len(df)] = new_row
+    if latest_date.date() >= datetime.datetime.now().date():
+        print("数据已包含今天，无需预测。")
     else:
-        print("未输入今日增长率, 未添加今日预测")
+        while True:
+            predict = input("请输入今天的预测日增长率(如-1=跌1%), q键跳过: ").strip()
+            if predict == 'q':
+                print("选择不添加今日预测")
+                break
+            try:
+                predict = float(predict)
+                new_row = {
+                    "净值日期": pd.to_datetime(datetime.datetime.now().date()),
+                    "单位净值": round(last_nav * (1 + predict / 100), 4),
+                    "日增长率": predict,
+                }
+                for col in df.columns:
+                    if col not in new_row:
+                        new_row[col] = np.nan
+                df.loc[len(df)] = new_row
+            except Exception as error:
+                print(error)
+                print("请重新输入")
     df["基金代码"] = fund_code
     df.sort_values("净值日期", inplace=True)
     df.reset_index(drop=True, inplace=True)
@@ -343,9 +354,17 @@ if __name__ == "__main__":
 
     code_list = get_fund_code(path=path)
     for fund_code in code_list:
-        print(fund_code)
         (basic_intro, fund_name) = basic_profile(fund_code)
-
+        print(f"\n准备处理: {fund_name}（{fund_code}）")
+        while True:
+            go = input("继续? c键=继续   q键=跳过\n输入: ").strip().lower()
+            if go == "q":
+                print("已跳过!")
+                continue
+            elif go == "c":
+                break
+            else:
+                print("输入有误, 重新输入!")
         holding = hold_base(fund_code, fund_name)
         print(holding[:10][["季度", "股票代码", "股票名称", "占净值比例"]])
 
