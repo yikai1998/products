@@ -205,7 +205,7 @@ def fetch_all_nav(fund_code: str):
     df["日增长率滑动均值"] = df["日增长率"].rolling(10).mean()
     df["日增长率极端涨幅"] = df["日增长率"].rolling(250).quantile(0.98)
     df["日增长率极端跌幅"] = df["日增长率"].rolling(250).quantile(0.01)
-    df["季度最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(30).max()) / df["单位净值"].rolling(90).max()
+    df["季度最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(90).max()) / df["单位净值"].rolling(90).max()
     df["年最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(260).max()) / df["单位净值"].rolling(260).max()
     df["连跌恐慌"] = (df["日增长率"] < -0.01).rolling(5).sum() >= 3
     up_days = []  # 连续上涨天数
@@ -357,15 +357,20 @@ if __name__ == "__main__":
     for fund_code in code_list:
         (basic_intro, fund_name) = basic_profile(fund_code)
         print(f"\n准备处理: {fund_name}（{fund_code}）")
+        skip = False
         while True:
             go = input("继续? c键=继续   q键=跳过\n输入: ").strip().lower()
             if go == "q":
                 print("已跳过!")
-                continue
+                skip = True
+                break
             elif go == "c":
                 break
             else:
                 print("输入有误, 重新输入!")
+        if skip:
+            continue
+
         holding = hold_base(fund_code, fund_name)
         print(holding[:10][["季度", "股票代码", "股票名称", "占净值比例"]])
 
