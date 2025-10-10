@@ -342,12 +342,13 @@ if __name__ == "__main__":
         '2': "基金代码名单_临时.txt",
         '3': "基金代码名单_备选.txt",
         '4': "基金代码名单_wjx.txt",
+        '5': "基金代码名单_行业.txt",
     }
     for k, v in file_map.items():
         print(f"{k}. {v.replace('.txt', '')}")
 
     while True:
-        choice = input(">> 请输入序号 (1~4): ").strip()
+        choice = input(">> 请输入序号 (1~5): ").strip()
         if choice in file_map:
             path = file_map[choice]
             break
