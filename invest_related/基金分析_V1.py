@@ -136,7 +136,7 @@ def fetch_all_nav(fund_code: str):
             并将预测行追加到数据表最后，并统一按“净值日期”升序排序。这样可纳入后续指标和信号分析，实现自动加人工混合推算。
         3. 指标构建与动量特征
             - 计算20日均线（MA20）、120日均线（MA120），用于判断中长期趋势。
-            - 计算近10日“日增长率滑动均值”，反映短期动能变化。
+            - 计算近10日“日增长率10日滑动均值”，反映短期动能变化。
             - 计算季度（30日/90日）和年度（260个交易日）最大回撤，用于风险评估。
             - 统计近阶段“连续上涨天数”“连续下跌天数”及标签，有助于刻画超买超卖及惯性走势。
             - 探测短期内“连跌恐慌”现象（如5日内多次大跌）。
@@ -202,9 +202,9 @@ def fetch_all_nav(fund_code: str):
         pct_list_60.append(pct)
     df["低于过去60日的价值百分比"] = pct_list_60
     df["日增长率"] = round(df["日增长率"] / 100, 4)
-    df["日增长率滑动均值"] = df["日增长率"].rolling(10).mean()
-    df["日增长率极端涨幅"] = df["日增长率"].rolling(250).quantile(0.98)
-    df["日增长率极端跌幅"] = df["日增长率"].rolling(250).quantile(0.01)
+    df["日增长率10日滑动均值"] = df["日增长率"].rolling(10).mean()
+    df["日增长率250日极端涨幅"] = df["日增长率"].rolling(250).quantile(0.98)
+    df["日增长率250日极端跌幅"] = df["日增长率"].rolling(250).quantile(0.01)
     df["季度最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(90).max()) / df["单位净值"].rolling(90).max()
     df["年最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(260).max()) / df["单位净值"].rolling(260).max()
     df["连跌恐慌"] = (df["日增长率"] < -0.01).rolling(5).sum() >= 3
@@ -250,14 +250,14 @@ def nav_signal_analysis(df):
 
     for i in range(len(df)):
         rate = df.loc[i, "日增长率"]
-        up_extreme = df.loc[i, "日增长率极端涨幅"]
-        down_extreme = df.loc[i, "日增长率极端跌幅"]
+        up_extreme = df.loc[i, "日增长率250日极端涨幅"]
+        down_extreme = df.loc[i, "日增长率250日极端跌幅"]
         price = df.loc[i, "单位净值"]
         ma20 = df.loc[i, "MA20"]
         ma120 = df.loc[i, "MA120"]
         p_under_total = df.loc[i, "低于历史价值百分比"]
         p_under_60d = df.loc[i, "低于过去60日的价值百分比"]
-        mean_growth_10d = df.loc[i, "日增长率滑动均值"]
+        mean_growth_10d = df.loc[i, "日增长率10日滑动均值"]
         qdraw = df.loc[i, "季度最大回撤"]
         hydraw = df.loc[i, "年最大回撤"]
         p_under_360d_high, p_under_360d_low = df.loc[i, "高估边界"], df.loc[i, "低估边界"]
@@ -292,7 +292,7 @@ def nav_signal_analysis(df):
 
     df["信号"] = tag
     df["低于过去60日的价值百分比"] = df["低于过去60日的价值百分比"].map(lambda x: "%.5f" % x)
-    df["日增长率滑动均值"] = df["日增长率滑动均值"].map(lambda x: "%.5f" % x)
+    df["日增长率10日滑动均值"] = df["日增长率10日滑动均值"].map(lambda x: "%.5f" % x)
     df["信号标记"] = (df["信号"] != df["信号"].shift()).cumsum()  # 列整体向下移动一行, 判断变化, 标记同一信号连续出现的段落
     df["信号连续天数"] = df.groupby("信号标记").cumcount() + 1  # 统计同一段的第几天
     df = df.drop(columns=["信号标记"])
@@ -356,8 +356,14 @@ if __name__ == "__main__":
 
     code_list = get_fund_code(path=path)
     for fund_code in code_list:
-        (basic_intro, fund_name) = basic_profile(fund_code)
-        print(f"\n准备处理: {fund_name}（{fund_code}）")
+        try:
+            (basic_intro, fund_name) = basic_profile(fund_code)
+            print(f"\n准备处理: {fund_name}（{fund_code}）")
+        except Exception as error:
+            print(error)
+            print("基金代码错误, 已自动跳过!")
+            time.sleep(5)
+            continue
         skip = False
         while True:
             go = input("继续? c键=继续   q键=跳过\n输入: ").strip().lower()
