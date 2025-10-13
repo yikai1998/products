@@ -11,6 +11,7 @@ import numpy as np
 import datetime
 import time
 import os
+import matplotlib.pyplot as plt
 
 
 def get_fund_code(path: str = "基金代码名单_持仓.txt"):
@@ -332,6 +333,36 @@ def nav_signal_analysis(df):
     return df
 
 
+def plot_fund_dashboard(df):
+    df_plot = df.sort_values('净值日期')
+    fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(22, 8), constrained_layout=True)
+
+    # 左图：单位净值
+    ax1.plot(df_plot["净值日期"], df_plot["单位净值"], label="Unit Net Value", color="blue", linewidth=2)
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Unit Net Value")
+    ax1.set_title("Past 250 Days Trend of Unit Net Value")
+    ax1.tick_params(axis='x', rotation=40)
+    ax1.margins(y=0.1)
+    ax1.legend(loc='upper left')
+
+    # 右图：低于历史价值百分比+高估低估边界
+    df_plot = df_plot.tail(250)
+    ax2.plot(df_plot["净值日期"], df_plot["低于历史价值百分比"], label="Percentage below historical value", color="blue", linewidth=2)
+    ax2.plot(df_plot["净值日期"], df_plot["高估边界"], label="Overvaluation Boundary", color="red", linestyle="--", linewidth=1.8)
+    ax2.plot(df_plot["净值日期"], df_plot["低估边界"], label="Undervaluation Boundary", color="green", linestyle="--", linewidth=1.8)
+    ax2.set_xlabel("Date")
+    ax2.set_ylabel("Percentile")
+    ax2.set_title("Over/Under-Value Boundary")
+    ax2.tick_params(axis='x', rotation=40)
+    ax2.margins(y=0.1)
+    ax2.legend(loc='upper left')
+    ax2.invert_yaxis()
+    p1 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史趋势_{datetime.datetime.now().strftime('%y%m%d')}.png"
+    plt.savefig(p1, dpi=200)
+    plt.show()
+
+
 if __name__ == "__main__":
     pd.set_option("display.max_columns", None)
     pd.set_option("display.max_rows", None)
@@ -385,5 +416,7 @@ if __name__ == "__main__":
         nav_df["基金名称"] = basic_intro["基金名称"]
         nav_df_ana = nav_signal_analysis(df=nav_df)
         print(nav_df_ana[["基金名称", "基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]].sort_values(ascending=False, by="净值日期").head(n=21).reset_index(drop=True))
+
+        plot_fund_dashboard(df=nav_df)
 
         time.sleep(2)
