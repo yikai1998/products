@@ -335,9 +335,9 @@ def nav_signal_analysis(df):
 
 def plot_fund_dashboard(df):
     df_plot = df.sort_values('净值日期')
-    fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(22, 8), constrained_layout=True)
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(nrows=2, ncols=2, figsize=(22, 8), constrained_layout=True)
 
-    # 左图：单位净值
+    # 历史: 单位净值
     ax1.plot(df_plot["净值日期"], df_plot["单位净值"], label="Unit Net Value", color="blue", linewidth=2)
     ax1.set_xlabel("Date")
     ax1.set_ylabel("Unit Net Value")
@@ -346,8 +346,7 @@ def plot_fund_dashboard(df):
     ax1.margins(y=0.1)
     ax1.legend(loc='upper left')
 
-    # 右图：低于历史价值百分比+高估低估边界
-    df_plot = df_plot.tail(250)
+    # 历史:低于历史价值百分比+高估低估边界
     ax2.plot(df_plot["净值日期"], df_plot["低于历史价值百分比"], label="Percentage below historical value", color="blue", linewidth=2)
     ax2.plot(df_plot["净值日期"], df_plot["高估边界"], label="Overvaluation Boundary", color="red", linestyle="--", linewidth=1.8)
     ax2.plot(df_plot["净值日期"], df_plot["低估边界"], label="Undervaluation Boundary", color="green", linestyle="--", linewidth=1.8)
@@ -356,8 +355,31 @@ def plot_fund_dashboard(df):
     ax2.set_title("Over/Under-Value Boundary")
     ax2.tick_params(axis='x', rotation=40)
     ax2.margins(y=0.1)
-    ax2.legend(loc='upper left')
+    ax2.legend(loc='lower right', fontsize=8, framealpha=0.8)
     ax2.invert_yaxis()
+
+    # 过去250天: 单位净值
+    df_plot = df_plot.tail(250)
+    ax3.plot(df_plot["净值日期"], df_plot["单位净值"], label="Unit Net Value", color="blue", linewidth=2)
+    ax3.set_xlabel("Date")
+    ax3.set_ylabel("Unit Net Value")
+    ax3.set_title("Past 250 Days Trend of Unit Net Value")
+    ax3.tick_params(axis='x', rotation=40)
+    ax3.margins(y=0.1)
+    ax3.legend(loc='upper left')
+
+    # 过去250天:低于历史价值百分比+高估低估边界
+    ax4.plot(df_plot["净值日期"], df_plot["低于历史价值百分比"], label="Percentage below historical value", color="blue", linewidth=2)
+    ax4.plot(df_plot["净值日期"], df_plot["高估边界"], label="Overvaluation Boundary", color="red", linestyle="--", linewidth=1.8)
+    ax4.plot(df_plot["净值日期"], df_plot["低估边界"], label="Undervaluation Boundary", color="green", linestyle="--", linewidth=1.8)
+    ax4.set_xlabel("Date")
+    ax4.set_ylabel("Percentile")
+    ax4.set_title("Over/Under-Value Boundary")
+    ax4.tick_params(axis='x', rotation=40)
+    ax4.margins(y=0.1)
+    ax4.legend(loc='lower right', fontsize=8, framealpha=0.8)
+    ax4.invert_yaxis()
+
     p1 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史趋势_{datetime.datetime.now().strftime('%y%m%d')}.png"
     plt.savefig(p1, dpi=200)
     plt.show()
