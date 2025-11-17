@@ -1,7 +1,7 @@
 # coding=gbk
 import re
 import pandas as pd
-import akshare as ak
+import akshare as ak  # 相关数据接口，读基金各种信息
 import requests
 import demjson3 as dj
 import bs4
@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 def get_fund_code(path: str = "基金代码名单_持仓.txt"):
     """
-    功能: 获取准备好的基金名单, 每行一个
+    功能: 获取准备好的基金名单，每行一个。文件允许有多余空白，会自动去掉；代码空则退出。
     参数: path 文本 文件路径
     返回: list
     """
@@ -31,9 +31,9 @@ def get_fund_code(path: str = "基金代码名单_持仓.txt"):
 
 def basic_profile(fund_code: str):
     """
-    功能: 获取基金的基本信息（如基金名称、类别、成立时间、运作状态、基金经理等），并以友好格式整理为多行字符串，便于展示概览/打印输出。
-    参数: fund_code 文本 基金代码，如 000001、161725 等，可带或不带后缀
-    返回: str
+    功能: 用AkShare获取基金的基本信息（如基金名称、类别、成立时间、运作状态、基金经理等），并以dict形式返回，便于展示概览/打印输出。
+    参数: fund_code 文本 基金代码，如 000001、161725 等。
+    返回: dic, str
     """
     print(f"正在拉取基金 {fund_code} 的简介 ……")
     basic = ak.fund_individual_basic_info_xq(symbol=fund_code)  # 返回 DataFrame
@@ -45,14 +45,13 @@ def basic_profile(fund_code: str):
         for k, v in intro.items():
             print(f"{k}\t{v}")
             f.write(f"{k}\t{v}\n")
-
     return intro, intro["基金名称"]
 
 
-def hold_base(symbol: str, name: str):
+def hold_base(fund_code: str, name: str):
     """
-    功能: 获取基金最近两个年度（含今年和去年）已披露的最新季度的股票重仓持仓数据。会自动兼容 AkShare 官方接口失效时抓取东方财富原始页面，支持通用公募基金。
-    参数: fund_code 文本 基金代码，如 000001、161725 等，可带或不带后缀
+    功能: 获取基金最近两个年度（含今年和去年）已披露的最新季度的股票重仓持仓数据。会自动兼容，AkShare官方接口失效时抓取东方财富原始页面（自动调用下方的manual_parse字符串解析），支持通用公募基金。
+    参数: fund_code 文本 基金代码，如 000001、161725 等。
     返回: DataFrame
     """
     print(f"正在拉取基金 {fund_code} 近两年度持仓 ……")
@@ -61,13 +60,13 @@ def hold_base(symbol: str, name: str):
     big = pd.DataFrame()
     for y in years:
         try:
-            r = ak.fund_portfolio_hold_em(symbol, y)  # akshare 官方实现
+            r = ak.fund_portfolio_hold_em(fund_code, y)  # akshare 官方实现
         except Exception as e:
             print(f"【akshare 接口失败】{e}，尝试自解析……")
             # 列名对不上 -> 自己手搓解析
-            r = manual_parse(symbol, y)
+            r = manual_parse(fund_code, y)
         if r.empty:
-            print(f"代码{symbol} 在 {y} 年暂未披露持仓")
+            print(f"代码{fund_code} 在 {y} 年暂未披露持仓")
             continue
         big = pd.concat([big, r], ignore_index=True)
     if big.empty:
@@ -84,15 +83,14 @@ def hold_base(symbol: str, name: str):
     os.makedirs(folder, exist_ok=True)
     filename = os.path.join(folder, f"最新持仓_{datetime.datetime.now().strftime('%y%m%d')}.csv")
     big.to_csv(path_or_buf=filename, encoding="utf-8", sep="\t", index=False)
-
     return big
 
 
 def manual_parse(symbol: str, year: str):
     """
     功能: 用于从东方财富F10（原网页）直接解析某基金某年度的全部历史持仓信息。这个函数一般作为hold_base的辅助后备方案，用于当 AkShare接口出错或字段结构不兼容时的爬虫。
-    参数: symbol 文本 基金代码，如 000001、161725 等，可带或不带后缀。year 文本 年份字符串，如 2023
-    返回: DataFrame
+    参数: symbol 文本 基金代码，如 000001、161725 等。year 文本 年份字符串，如 2023 等。
+    返回: dataFrame
     """
     url = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
     params = {"type": "jjcc", "code": symbol, "topline": 10000, "year": year, "month": "", "rt": "0.913877030254846"}
@@ -102,9 +100,7 @@ def manual_parse(symbol: str, year: str):
     if not data.get("content", "").strip():
         return pd.DataFrame()
     soup = bs4.BeautifulSoup(data["content"], "lxml")
-    heads = [h4.text.split("\xa0\xa0")[1] for h4 in
-             soup.find_all("h4", class_="t")]  # <h4 class="t">2024Q1</h4>“分隔符”, \xa0\xa0“不间断空格”
-
+    heads = [h4.text.split("\xa0\xa0")[1] for h4 in soup.find_all("h4", class_="t")]  # <h4 class="t">2024Q1</h4>“分隔符”, \xa0\xa0“不间断空格”
     big = pd.DataFrame()
     for q, html_table in enumerate(pd.read_html(io.StringIO(data["content"]), converters={"股票代码": str})):
         # 把字符串“伪装”成类文件对象，让 pandas 走“内存文本”分支，一次性读表。强制将股票代码当作str看待
@@ -115,19 +111,16 @@ def manual_parse(symbol: str, year: str):
             html_table["占净值比例"] = pd.NA
         else:
             html_table["占净值比例"] = html_table[ratio_col].astype(str).str.replace("%", "", regex=False)
-
         # A new DataFrame with the new columns in addition to all the existing columns.
-        sub = (
-            html_table.assign(季度=heads[q]))
+        sub = html_table.assign(季度=heads[q])
         big = pd.concat([big, sub], ignore_index=True)
-
     return big
 
 
 def fetch_all_nav(fund_code: str):
     """
-    功能: 根据基金代码拉取全部历史净值
-    参数: fund_code 文本 基金代码，如 000001、161725 等，可带或不带后缀
+    功能: 根据基金代码拉取全部历史净值。
+    参数: fund_code 文本 基金代码，如 000001、161725 等。
     返回: dataframe
     介绍:
         1. 数据获取
@@ -138,9 +131,9 @@ def fetch_all_nav(fund_code: str):
         3. 指标构建与动量特征
             - 计算20日均线（MA20）、120日均线（MA120），用于判断中长期趋势。
             - 计算近10日“日增长率10日滑动均值”，反映短期动能变化。
-            - 计算季度（30日/90日）和年度（260个交易日）最大回撤，用于风险评估。
+            - 计算季度和年度的最大回撤，用于风险评估。
             - 统计近阶段“连续上涨天数”“连续下跌天数”及标签，有助于刻画超买超卖及惯性走势。
-            - 探测短期内“连跌恐慌”现象（如5日内多次大跌）。
+            - 探测短期内“连跌恐慌”现象（如数日内多次大跌）
         4. 历史分位与动态估值
             - 计算“低于历史价值百分比”：反映当前净值在全部历史中的相对估值水平（百分比分位）。
             - 计算“低于过去60日的价值百分比”：近两月的分位，减少历史极端值干扰，突出近期估值。
@@ -151,8 +144,6 @@ def fetch_all_nav(fund_code: str):
         df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")  # 累计净值走势
     except Exception as e:
         print(f"[错误] 拉取数据失败，原因：{e}")
-        sys.exit()
-
     df["净值日期"] = pd.to_datetime(df["净值日期"])
     latest_date = df["净值日期"].max()
     print(f"数据已拉取，最新净值日期：{latest_date.date()}")
@@ -163,8 +154,8 @@ def fetch_all_nav(fund_code: str):
         print("数据已包含今天，无需预测。")
     else:
         while True:
-            predict = input("请输入今天的预测日增长率(如-1=跌1%), q键跳过: ").strip()
-            if predict == 'q':
+            predict = input("请输入今天的预测日增长率(如-1=跌1%)，q键跳过：").strip()
+            if predict == "q":
                 print("选择不添加今日预测")
                 break
             try:
@@ -181,9 +172,9 @@ def fetch_all_nav(fund_code: str):
                 break
             except Exception as error:
                 print(error)
-                print("请重新输入")
+                print("请重新输入！")
     df["基金代码"] = fund_code
-    df.sort_values("净值日期", inplace=True)
+    df.sort_values(by="净值日期", inplace=True)
     df.reset_index(drop=True, inplace=True)
     df["MA20"] = df["单位净值"].rolling(20).mean()
     df["MA120"] = df["单位净值"].rolling(120).mean()
@@ -193,8 +184,8 @@ def fetch_all_nav(fund_code: str):
         pct = (history > df["单位净值"].iloc[i]).mean()
         pct_list_all.append(pct)
     df["低于历史价值百分比"] = pct_list_all
-    # 动态阈值：随过去xx天滚动，从低到高排(从高估到低估)，低于历史价值百分比的第2%｜80%分位值
-    df["高估边界"] = df["低于历史价值百分比"].rolling(260).quantile(0.02)
+    # 动态阈值：随过去xx天滚动，默认从低到高排(从高估到低估)，低于历史价值百分比的第2%｜80%分位值
+    df["高估边界"] = df["低于历史价值百分比"].rolling(260).quantile(0.02)  # 第2百分位数，即 比98%的数据值小
     df["低估边界"] = df["低于历史价值百分比"].rolling(260).quantile(0.8)
     pct_list_60 = [None] * 60
     for i in range(60, len(df)):
@@ -231,16 +222,15 @@ def fetch_all_nav(fund_code: str):
         lambda row: f"连续上涨{row["连续上涨天数"]}天" if row["连续上涨天数"] > 0 else f"连续下跌{row["连续下跌天数"]}天",
         axis=1
     )
-
     return df
 
 
 def nav_signal_analysis(df):
     """
     1. 多元量化投资信号输出
-    - 信号判据融合了价格与均线关系、分位估值、短期/长期动量、回撤风险、连涨连跌状态等多维因子。
-    - 逐日自动打标以下场景（结合信号周期与累计涨跌）
-    - “连续上涨/下跌天数”与信号配合，可以辅助规避追涨杀跌情绪、改进定投策略。
+        - 信号判据融合了价格与均线关系、分位估值、短期/长期动量、回撤风险、连涨连跌状态等多维因子。
+        - 逐日自动打标以下场景（结合信号周期与累计涨跌）
+        - “连续上涨/下跌天数”与信号配合，可以辅助规避追涨杀跌情绪、改进定投策略。
     2. 其它
         - 支持信号分段、阶段天数等统计，利于后续分析各信号状态持续时间及周期节奏。
         - 最终输出含历史全部关键指标与信号的DataFrame，为量化择时、估值分析以及定投、左侧配置等实战场景提供参考依据。
@@ -248,7 +238,6 @@ def nav_signal_analysis(df):
     """
     df = df.copy()
     tag = []
-
     for i in range(len(df)):
         rate = df.loc[i, "日增长率"]
         up_extreme = df.loc[i, "日增长率250日极端涨幅"]
@@ -329,57 +318,58 @@ def nav_signal_analysis(df):
     </html>"""
     with open(p2, encoding="utf-8", mode="w") as f:
         f.write(full_html)
-
     return df
 
 
 def plot_fund_dashboard(df):
-    df_plot = df.sort_values('净值日期')
+    """
+    自动可视化仪表盘，分为4块：
+        1. 全历史净值趋势
+        2. 全历史分位+高估/低估线
+        3. 近250天净值趋势
+        4. 近250天分位+高低估线
+    """
+    df_plot = df.sort_values("净值日期")
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(nrows=2, ncols=2, figsize=(22, 8), constrained_layout=True)
-
     # 历史: 单位净值
     ax1.plot(df_plot["净值日期"], df_plot["单位净值"], label="Unit Net Value", color="blue", linewidth=2)
     ax1.set_xlabel("Date")
     ax1.set_ylabel("Unit Net Value")
     ax1.set_title("Past 250 Days Trend of Unit Net Value")
-    ax1.tick_params(axis='x', rotation=40)
+    ax1.tick_params(axis="x", rotation=40)
     ax1.margins(y=0.1)
-    ax1.legend(loc='upper left')
-
-    # 历史:低于历史价值百分比+高估低估边界
+    ax1.legend(loc="upper left")
+    # 历史: 低于历史价值百分比+高估低估边界
     ax2.plot(df_plot["净值日期"], df_plot["低于历史价值百分比"], label="Percentage below historical value", color="blue", linewidth=2)
     ax2.plot(df_plot["净值日期"], df_plot["高估边界"], label="Overvaluation Boundary", color="red", linestyle="--", linewidth=1.8)
     ax2.plot(df_plot["净值日期"], df_plot["低估边界"], label="Undervaluation Boundary", color="green", linestyle="--", linewidth=1.8)
     ax2.set_xlabel("Date")
     ax2.set_ylabel("Percentile")
     ax2.set_title("Over/Under-Value Boundary")
-    ax2.tick_params(axis='x', rotation=40)
+    ax2.tick_params(axis="x", rotation=40)
     ax2.margins(y=0.1)
-    ax2.legend(loc='lower right', fontsize=8, framealpha=0.8)
+    ax2.legend(loc="lower right", fontsize=8, framealpha=0.8)
     ax2.invert_yaxis()
-
     # 过去250天: 单位净值
     df_plot = df_plot.tail(250)
     ax3.plot(df_plot["净值日期"], df_plot["单位净值"], label="Unit Net Value", color="blue", linewidth=2)
     ax3.set_xlabel("Date")
     ax3.set_ylabel("Unit Net Value")
     ax3.set_title("Past 250 Days Trend of Unit Net Value")
-    ax3.tick_params(axis='x', rotation=40)
+    ax3.tick_params(axis="x", rotation=40)
     ax3.margins(y=0.1)
-    ax3.legend(loc='upper left')
-
-    # 过去250天:低于历史价值百分比+高估低估边界
+    ax3.legend(loc="upper left")
+    # 过去250天: 低于历史价值百分比+高估低估边界
     ax4.plot(df_plot["净值日期"], df_plot["低于历史价值百分比"], label="Percentage below historical value", color="blue", linewidth=2)
     ax4.plot(df_plot["净值日期"], df_plot["高估边界"], label="Overvaluation Boundary", color="red", linestyle="--", linewidth=1.8)
     ax4.plot(df_plot["净值日期"], df_plot["低估边界"], label="Undervaluation Boundary", color="green", linestyle="--", linewidth=1.8)
     ax4.set_xlabel("Date")
     ax4.set_ylabel("Percentile")
     ax4.set_title("Over/Under-Value Boundary")
-    ax4.tick_params(axis='x', rotation=40)
+    ax4.tick_params(axis="x", rotation=40)
     ax4.margins(y=0.1)
-    ax4.legend(loc='lower right', fontsize=8, framealpha=0.8)
+    ax4.legend(loc="lower right", fontsize=8, framealpha=0.8)
     ax4.invert_yaxis()
-
     p1 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史趋势_{datetime.datetime.now().strftime('%y%m%d')}.png"
     plt.savefig(p1, dpi=200)
     plt.show()
@@ -391,43 +381,46 @@ if __name__ == "__main__":
     pd.set_option("display.width", 1000)
 
     file_map = {
-        '1': "基金代码名单_持仓.txt",
-        '2': "基金代码名单_临时.txt",
-        '3': "基金代码名单_备选.txt",
-        '4': "基金代码名单_wjx.txt",
-        '5': "基金代码名单_行业.txt",
+        "1": "基金代码名单_持仓.txt",
+        "2": "基金代码名单_临时.txt",
+        "3": "基金代码名单_备选.txt",
+        "4": "基金代码名单_wjx.txt",
+        "5": "基金代码名单_行业.txt",
     }
+
     for k, v in file_map.items():
         print(f"{k}. {v.replace('.txt', '')}")
 
     while True:
-        choice = input(">> 请输入序号 (1~5): ").strip()
+        choice = input(">> 请输入序号 (1~5)：").strip()
         if choice in file_map:
             path = file_map[choice]
             break
-        print("输入有误!")
+        print("输入有误！")
 
     code_list = get_fund_code(path=path)
     for fund_code in code_list:
         try:
             (basic_intro, fund_name) = basic_profile(fund_code)
-            print(f"\n准备处理: {fund_name}（{fund_code}）")
+            print(f"\n准备处理：{fund_name}（{fund_code}）")
         except Exception as error:
             print(error)
-            print("基金代码错误, 已自动跳过!")
-            time.sleep(5)
+            print("基金代码错误, 已自动跳过！")
+            time.sleep(3)
             continue
+
         skip = False
+
         while True:
-            go = input("继续? c键=继续   q键=跳过\n输入: ").strip().lower()
+            go = input("继续？c键=继续   q键=跳过\n输入：").strip().lower()
             if go == "q":
-                print("已跳过!")
+                print("已跳过！")
                 skip = True
                 break
             elif go == "c":
                 break
             else:
-                print("输入有误, 重新输入!")
+                print("输入有误，重新输入！")
         if skip:
             continue
 
