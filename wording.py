@@ -29,11 +29,13 @@ def choose_voice(voice_list, lang_name):
         print(f"{i}. {v.name} | {v.id}")
 
     while True:
-        s = input(f"请选择一个{lang_name} voice 编号：").strip()
+        s = input(f"请选择一个{lang_name} voice 编号 (0表示不用)：").strip()
         if not s.isdigit():
             print("请输入数字编号。")
             continue
         idx = int(s)
+        if idx == 0:
+            return 0
         if not (1 <= idx <= len(voice_list)):
             print("编号超出范围，请重新输入。")
             continue
@@ -70,10 +72,6 @@ base = [
 ]
 print(f"一共{len(base)}个单词。")
 
-if selected_voice is None:
-    print("没有可用 voice，程序结束。")
-    exit()
-
 while True:
     s = input("你计划抽几个单词：").strip()
     if not s.isdigit():
@@ -99,20 +97,18 @@ for c, word in enumerate(review_list, 1):
         result = f"翻译失败：{e}"
 
     print(f"第{c}个单词： {word}")
-
-    input("按回车播放读音")
-    try:
-        engine = pyttsx3.init()
-        engine.setProperty("voice", selected_voice.id)
-        engine.setProperty("rate", 120)
-        engine.setProperty("volume", 1)
-        engine.say(word)
-        engine.runAndWait()
-        engine.stop()
-    except Exception as e:
-        print(f"朗读失败：{e}")
-
-
+    if selected_voice != 0:
+        input("按回车播放读音")
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty("voice", selected_voice.id)
+            engine.setProperty("rate", 120)
+            engine.setProperty("volume", 1)
+            engine.say(word)
+            engine.runAndWait()
+            engine.stop()
+        except Exception as e:
+            print(f"朗读失败：{e}")
     input("按回车显示翻译结果")
     print(result)
     if c < len(review_list):
