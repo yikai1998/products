@@ -1,7 +1,6 @@
 # coding = utf-8
 import pyttsx3
 import time
-import pandas as pd
 from deep_translator import GoogleTranslator
 import random
 
