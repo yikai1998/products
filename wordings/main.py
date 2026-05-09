@@ -52,7 +52,7 @@ for c, word in enumerate(review_list, 1):
     engine.say(word)
     engine.runAndWait()
     engine.stop()
-    del engine
+    del engine  # 删除变量(引擎对象)
     time.sleep(0.2)
     _ = input("按回车显示原文")
     print(f"{c}: {word}")
