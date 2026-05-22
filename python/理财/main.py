@@ -23,9 +23,11 @@ def get_fund_code(path: str = "基金代码名单_持仓.txt"):
     with open(file=path, mode="r", encoding="utf-8") as f:
         fund_code_list = [line.strip().split()[0] for line in f if line.strip()]
         print(fund_code_list)
+
     if len(fund_code_list) == 0:
         print("基金代码名单为空")
         sys.exit(1)
+
     return fund_code_list
 
 
@@ -40,17 +42,20 @@ def basic_profile(fund_code: str):
     intro = {str(k): str(v) if pd.notna(v) else "" for k, v in basic.values}
     folder = f"{intro['基金名称']}_基金代码{fund_code}"
     os.makedirs(folder, exist_ok=True)
-    filename = os.path.join(folder, f"简介_{datetime.datetime.now().strftime('%y%m%d')}.txt")
+    filename = os.path.join(folder, "简介.txt")
+
     with open(filename, "w", encoding="utf-8") as f:
         for k, v in intro.items():
             print(f"{k}\t{v}")
             f.write(f"{k}\t{v}\n")
+
     return intro, intro["基金名称"]
 
 
 def hold_base(fund_code: str, name: str):
     """
-    功能: 获取基金最近两个年度（含今年和去年）已披露的最新季度的股票重仓持仓数据。会自动兼容，AkShare官方接口失效时抓取东方财富原始页面（自动调用下方的manual_parse字符串解析），支持通用公募基金。
+    功能: 获取基金最近两个年度（含今年和去年）已披露的最新季度的股票重仓持仓数据。
+         会自动兼容，AkShare官方接口失效时抓取东方财富原始页面（自动调用下方的manual_parse字符串解析），支持通用公募基金。
     参数: fund_code 文本 基金代码，如 000001、161725 等。
     返回: DataFrame
     """
@@ -58,54 +63,57 @@ def hold_base(fund_code: str, name: str):
     now = datetime.datetime.now()
     years = [str(now.year - 1), str(now.year)]
     big = pd.DataFrame()
+
     for y in years:
         try:
-            r = ak.fund_portfolio_hold_em(fund_code, y)  # akshare 官方实现
+            r = ak.fund_portfolio_hold_em(fund_code, y)
         except Exception as e:
-            print(f"【akshare 接口失败】{e}，尝试自解析……")
-            # 列名对不上 -> 自己手搓解析
-            r = manual_parse(fund_code, y)
+            print(f"[akshare 接口失败] {e}，尝试自解析……")
+            r = manual_parse(fund_code, y)  # 列名对不上 -> 自己手搓解析
         if r.empty:
             print(f"代码{fund_code} 在 {y} 年暂未披露持仓")
             continue
         big = pd.concat([big, r], ignore_index=True)
+
     if big.empty:
         return pd.DataFrame(columns=["股票代码", "股票名称", "占净值比例", "持股数", "持仓市值", "季度"])
-    # 生成可排序的“标准季度”列
-    big["std_q"] = (big["季度"].str.extract(r"(\d{4})[年Qq]([1234])")[0] + "Q" + big["季度"].str.extract(r"(\d{4})[年Qq]([1234])")[1]).apply(lambda x: pd.Period(x, freq="Q"))
-    # 取最新季度
-    latest_q = big["std_q"].max()
-    # 一次性捞出所有属于最新季度的行
+
+    big["std_q"] = (big["季度"].str.extract(r"(\d{4})[年Qq]([1234])")[0] + "Q" + big["季度"].str.extract(r"(\d{4})[年Qq]([1234])")[1]).apply(lambda x: pd.Period(x, freq="Q"))  # 生成可排序的“标准季度”列
+    latest_q = big["std_q"].max()  # 取最新季度
     big = big[big["std_q"] == latest_q].drop(columns=["std_q"])
+    big["占净值比例"] = pd.to_numeric(big["占净值比例"], errors="coerce")
     big.sort_values(by="占净值比例", inplace=True, ascending=False)
     big.reset_index(drop=True, inplace=True)
     folder = f"{name}_基金代码{fund_code}"
     os.makedirs(folder, exist_ok=True)
-    filename = os.path.join(folder, f"最新持仓_{datetime.datetime.now().strftime('%y%m%d')}.csv")
+    filename = os.path.join(folder, f"最新持仓.csv")
     big.to_csv(path_or_buf=filename, encoding="utf-8", sep="\t", index=False)
+
     return big
 
 
 def manual_parse(symbol: str, year: str):
     """
-    功能: 用于从东方财富F10（原网页）直接解析某基金某年度的全部历史持仓信息。这个函数一般作为hold_base的辅助后备方案，用于当 AkShare接口出错或字段结构不兼容时的爬虫。
+    功能: 用于从东方财富F10（原网页）直接解析某基金某年度的全部历史持仓信息。
+         这个函数一般作为hold_base的辅助后备方案，用于当 AkShare接口出错或字段结构不兼容时的爬虫。
     参数: symbol 文本 基金代码，如 000001、161725 等。year 文本 年份字符串，如 2023 等。
     返回: dataFrame
     """
     url = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
     params = {"type": "jjcc", "code": symbol, "topline": 10000, "year": year, "month": "", "rt": "0.913877030254846"}
-    txt = requests.get(url, params=params, timeout=10).text  # 防止脚本卡死
+    txt = requests.get(url=url, params=params, timeout=10).text
     data = dj.decode(txt[txt.find("{"): -1])
-    # 没有表格直接返回空表
     if not data.get("content", "").strip():
         return pd.DataFrame()
+
     soup = bs4.BeautifulSoup(data["content"], "lxml")
     heads = [h4.text.split("\xa0\xa0")[1] for h4 in soup.find_all("h4", class_="t")]  # <h4 class="t">2024Q1</h4>“分隔符”, \xa0\xa0“不间断空格”
     big = pd.DataFrame()
+
     for q, html_table in enumerate(pd.read_html(io.StringIO(data["content"]), converters={"股票代码": str})):
         # 把字符串“伪装”成类文件对象，让 pandas 走“内存文本”分支，一次性读表。强制将股票代码当作str看待
         # 把所有列名里的空格、%、全角括号全干掉，方便后面模糊匹配
-        html_table.columns = [re.sub(r"[ %　\(\)（）]", "", c.strip()) for c in html_table.columns]
+        html_table.columns = [re.sub(r"[ %　()（）]", "", c.strip()) for c in html_table.columns]
         ratio_col = next((c for c in html_table.columns if "占净值" in c), None)  # “找第一个满足条件的元素”的惯用写法，找不到就 None
         if ratio_col is None:
             html_table["占净值比例"] = pd.NA
@@ -114,6 +122,7 @@ def manual_parse(symbol: str, year: str):
         # A new DataFrame with the new columns in addition to all the existing columns.
         sub = html_table.assign(季度=heads[q])
         big = pd.concat([big, sub], ignore_index=True)
+
     return big
 
 
@@ -141,15 +150,23 @@ def fetch_all_nav(fund_code: str):
     """
     print(f"正在拉取基金 {fund_code} 的全部历史净值 ……")
     try:
-        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")  # 累计净值走势
+        df_unit = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        df_cum = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")  # 单位净值在每次分红后会大幅回落
+        df = df_unit.merge(df_cum[["净值日期", "累计净值"]], on="净值日期", how="left")
     except Exception as e:
         print(f"[错误] 拉取数据失败，原因：{e}")
+        return pd.DataFrame()
+
+    df["净值日期"] = pd.to_datetime(df["净值日期"], errors="coerce")
+    df["单位净值"] = pd.to_numeric(df["单位净值"], errors="coerce")
+    df["日增长率"] = pd.to_numeric(df["日增长率"], errors="coerce")
+    df = df.dropna(subset=["净值日期", "单位净值"])
     df["净值日期"] = pd.to_datetime(df["净值日期"])
     latest_date = df["净值日期"].max()
     print(f"数据已拉取，最新净值日期：{latest_date.date()}")
-    # 获取上一日的单位净值
-    last_nav = df.sort_values("净值日期")["单位净值"].iloc[-1]
-    # 人工添加数据, 视情况
+    df_sorted = df.sort_values("净值日期")
+    last_nav = df_sorted["单位净值"].iloc[-1]  # 获取上一日的单位净值
+    last_cum_nav = df_sorted["累计净值"].iloc[-1]
     if latest_date.date() >= datetime.datetime.now().date():
         print("数据已包含今天，无需预测。")
     else:
@@ -163,6 +180,7 @@ def fetch_all_nav(fund_code: str):
                 new_row = {
                     "净值日期": pd.to_datetime(datetime.datetime.now().date()),
                     "单位净值": round(last_nav * (1 + predict / 100), 4),
+                    "累计净值": round(last_cum_nav * (1 + predict / 100), 4),
                     "日增长率": predict,
                 }
                 for col in df.columns:
@@ -173,6 +191,7 @@ def fetch_all_nav(fund_code: str):
             except Exception as error:
                 print(error)
                 print("请重新输入！")
+
     df["基金代码"] = fund_code
     df.sort_values(by="净值日期", inplace=True)
     df.reset_index(drop=True, inplace=True)
@@ -180,26 +199,30 @@ def fetch_all_nav(fund_code: str):
     df["MA120"] = df["单位净值"].rolling(120).mean()
     pct_list_all = [np.nan]
     for i in range(1, len(df)):
-        history = df["单位净值"].iloc[:i]
-        pct = (history > df["单位净值"].iloc[i]).mean()
+        history = df["累计净值"].iloc[:i]
+        pct = (history > df["累计净值"].iloc[i]).mean()
         pct_list_all.append(pct)
+
     df["低于历史价值百分比"] = pct_list_all
-    # 动态阈值：随过去xx天滚动，默认从低到高排(从高估到低估)，低于历史价值百分比的第2%｜80%分位值
-    df["高估边界"] = df["低于历史价值百分比"].rolling(260).quantile(0.02)  # 第2百分位数，即 比98%的数据值小
-    df["低估边界"] = df["低于历史价值百分比"].rolling(260).quantile(0.8)
+    # 动态阈值：随过去xx天滚动，默认从低到高排(从高估到低估)，低于历史价值百分比的第xx%分位值
+    df["高估边界"] = df["低于历史价值百分比"].rolling(750).quantile(0.1).shift(1)
+    df["低估边界"] = df["低于历史价值百分比"].rolling(750).quantile(0.9).shift(1)
+
     pct_list_60 = [None] * 60
     for i in range(60, len(df)):
-        history = df["单位净值"].iloc[(i - 60):i]
-        pct = (history > df["单位净值"].iloc[i]).mean()
+        history = df["累计净值"].iloc[(i - 60):i]
+        pct = (history > df["累计净值"].iloc[i]).mean()
         pct_list_60.append(pct)
+
     df["低于过去60日的价值百分比"] = pct_list_60
     df["日增长率"] = round(df["日增长率"] / 100, 4)
     df["日增长率10日滑动均值"] = df["日增长率"].rolling(10).mean()
-    df["日增长率250日极端涨幅"] = df["日增长率"].rolling(250).quantile(0.98)
-    df["日增长率250日极端跌幅"] = df["日增长率"].rolling(250).quantile(0.01)
-    df["季度最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(90).max()) / df["单位净值"].rolling(90).max()
-    df["年最大回撤"] = (df["单位净值"] - df["单位净值"].rolling(260).max()) / df["单位净值"].rolling(260).max()
+    df["日增长率250日极端涨幅"] = df["日增长率"].rolling(250).quantile(0.98).shift(1)
+    df["日增长率250日极端跌幅"] = df["日增长率"].rolling(250).quantile(0.01).shift(1)
+    df["季度最大回撤"] = (df["累计净值"] - df["累计净值"].rolling(90).max()) / df["累计净值"].rolling(90).max()
+    df["年最大回撤"] = (df["累计净值"] - df["累计净值"].rolling(260).max()) / df["累计净值"].rolling(260).max()
     df["连跌恐慌"] = (df["日增长率"] < -0.01).rolling(5).sum() >= 3
+
     up_days = []  # 连续上涨天数
     cnt = 0
     for rate in df["日增长率"]:
@@ -219,13 +242,14 @@ def fetch_all_nav(fund_code: str):
         down_days.append(cnt)
     df["连续下跌天数"] = down_days
     df["连涨连跌标签"] = df.apply(
-        lambda row: f"连续上涨{row["连续上涨天数"]}天" if row["连续上涨天数"] > 0 else f"连续下跌{row["连续下跌天数"]}天",
+        lambda row: f"连续上涨{row['连续上涨天数']}天" if row['连续上涨天数'] > 0 else f"连续下跌{row['连续下跌天数']}天",
         axis=1
     )
+
     return df
 
 
-def nav_signal_analysis(df):
+def nav_signal_analysis(df, fund_code):
     """
     1. 多元量化投资信号输出
         - 信号判据融合了价格与均线关系、分位估值、短期/长期动量、回撤风险、连涨连跌状态等多维因子。
@@ -238,7 +262,21 @@ def nav_signal_analysis(df):
     """
     df = df.copy()
     tag = []
+
     for i in range(len(df)):
+        need_cols = [
+            "日增长率250日极端涨幅",
+            "日增长率250日极端跌幅",
+            "MA20",
+            "MA120",
+            "高估边界",
+            "低估边界",
+            "年最大回撤",
+        ]
+        if df.loc[i, need_cols].isna().any():
+            tag.append("数据不足")
+            continue
+
         rate = df.loc[i, "日增长率"]
         up_extreme = df.loc[i, "日增长率250日极端涨幅"]
         down_extreme = df.loc[i, "日增长率250日极端跌幅"]
@@ -258,42 +296,48 @@ def nav_signal_analysis(df):
         if (rate >= up_extreme) and (p_under_total <= p_under_360d_high) and (up_days >= 2):
             tag.append("极端大涨 且 高估")  # 建议落袋
         elif (rate <= down_extreme) and (p_under_total >= p_under_360d_low) and (down_days >= 2):
-            tag.append("极端大跌 且 低估")  # 关注机会
+            tag.append("极端大跌 且 低估")  # 可分批加仓
         elif rate >= up_extreme:
             tag.append("极端大涨（未高估）")  # 警惕追高
         elif rate <= down_extreme:
             tag.append("极端大跌（未低估）")  # 耐心观望
         elif (price > ma20) and (ma20 > ma120) and (mean_growth_10d > 0.001) and (qdraw >= -0.05) and (p_under_total > p_under_360d_high):
             tag.append("良性上涨")  # 可适量增持
-        elif (price > ma20) and (price > ma120) and (p_under_total <= p_under_360d_high) and (up_days >= 5):
+        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (qdraw < -0.05):
+            tag.append("上涨尾声")  # 分批落袋
+        elif (price > ma20) and (price > ma120) and (p_under_total <= p_under_360d_high):
             tag.append("高估")  # 卖
         elif (price < ma20) and (price < ma120) and (p_under_total <= p_under_360d_high):
             tag.append("动力不强, 但仍高估")  # 观望/减仓
-        elif (price > ma20) and (price > ma120) and (ma20 > ma120) and (mean_growth_10d < 0.001) and (qdraw < -0.05) and (up_days >= 3):
-            tag.append("上涨尾声")  # 分批落袋
         elif (price < ma20) and (price < ma120) and (p_under_total >= p_under_360d_low):
-            tag.append("动力不强, 但低估")  # 考虑分批买进
-        elif (price > ma120 or p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (down_days >= 3):
-            tag.append("低估")  # 可买
+            tag.append("动力不强, 但低估")  # 不动
+        elif (price > ma120) and (price < ma20):
+            if p_under_total >= p_under_360d_low:
+                tag.append("短期调整，长期低估")  # 反弹初期可关注
+            else:
+                tag.append("短期调整，估值中性")  # 观望
+        elif (p_under_total >= p_under_360d_low) and (hydraw < -0.2) and (p_under_60d >= 0.85) and (down_days >= 3):
+            tag.append("低估")  # 不动
         elif panic and (p_under_total >= p_under_360d_low):
             tag.append("连跌加速")  # 可关注/耐心等待
+
         else:
             tag.append("合理区间波动")
 
     df["信号"] = tag
-    df["低于过去60日的价值百分比"] = df["低于过去60日的价值百分比"].map(lambda x: "%.5f" % x)
-    df["日增长率10日滑动均值"] = df["日增长率10日滑动均值"].map(lambda x: "%.5f" % x)
+    df["低于过去60日的价值百分比"] = pd.to_numeric(df["低于过去60日的价值百分比"], errors="coerce")
     df["信号标记"] = (df["信号"] != df["信号"].shift()).cumsum()  # 列整体向下移动一行, 判断变化, 标记同一信号连续出现的段落
     df["信号连续天数"] = df.groupby("信号标记").cumcount() + 1  # 统计同一段的第几天
     df = df.drop(columns=["信号标记"])
     df.sort_values(by="净值日期", ascending=False, inplace=True)
     df.reset_index(drop=True, inplace=True)
-    folder = f"{df["基金名称"][0]}_基金代码{fund_code}"
+    folder = f"{df['基金名称'][0]}_基金代码{fund_code}"
     os.makedirs(folder, exist_ok=True)
-    p1 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史净值_{datetime.datetime.now().strftime('%y%m%d')}.csv"
-    df.to_csv(path_or_buf=p1, encoding="utf-8", sep="\t", index=False)
-    p2 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史净值_{datetime.datetime.now().strftime('%y%m%d')}.html"
-    table_html = df.to_html(index=False)
+    p1 = f"{df['基金名称'][0]}_基金代码{fund_code}/历史净值.csv"
+    df.to_csv(path_or_buf=p1, encoding="utf-8", sep="\t", index=False, float_format="%.5f")
+    p2 = f"{df['基金名称'][0]}_基金代码{fund_code}/历史净值.html"
+
+    table_html = df.to_html(index=False, float_format=lambda x: f"{x:.5f}")
     full_html = f"""<!DOCTYPE html>
     <html>
     <head>
@@ -316,12 +360,14 @@ def nav_signal_analysis(df):
     {table_html}
     </body>
     </html>"""
+
     with open(p2, encoding="utf-8", mode="w") as f:
         f.write(full_html)
+
     return df
 
 
-def plot_fund_dashboard(df):
+def plot_fund_dashboard(df, fund_code):
     """
     自动可视化仪表盘，分为4块：
         1. 全历史净值趋势
@@ -335,7 +381,7 @@ def plot_fund_dashboard(df):
     ax1.plot(df_plot["净值日期"], df_plot["单位净值"], label="Unit Net Value", color="blue", linewidth=2)
     ax1.set_xlabel("Date")
     ax1.set_ylabel("Unit Net Value")
-    ax1.set_title("Past 250 Days Trend of Unit Net Value")
+    ax1.set_title("Full History Trend of Unit Net Value")
     ax1.tick_params(axis="x", rotation=40)
     ax1.margins(y=0.1)
     ax1.legend(loc="upper left")
@@ -370,7 +416,9 @@ def plot_fund_dashboard(df):
     ax4.margins(y=0.1)
     ax4.legend(loc="lower right", fontsize=8, framealpha=0.8)
     ax4.invert_yaxis()
-    p1 = f"{df["基金名称"][0]}_基金代码{fund_code}/历史趋势_{datetime.datetime.now().strftime('%y%m%d')}.png"
+    fund_name = df["基金名称"].iloc[0]
+    folder = f"{fund_name}_基金代码{fund_code}"
+    p1 = os.path.join(folder, "历史趋势.png")
     plt.savefig(p1, dpi=200)
     plt.show()
 
@@ -429,9 +477,9 @@ if __name__ == "__main__":
 
         nav_df = fetch_all_nav(fund_code)
         nav_df["基金名称"] = basic_intro["基金名称"]
-        nav_df_ana = nav_signal_analysis(df=nav_df)
+        nav_df_ana = nav_signal_analysis(df=nav_df, fund_code=fund_code)
         print(nav_df_ana[["基金名称", "基金代码", "净值日期", "单位净值", "日增长率", "低于历史价值百分比", "信号", "信号连续天数", "连涨连跌标签"]].sort_values(ascending=False, by="净值日期").head(n=21).reset_index(drop=True))
 
-        plot_fund_dashboard(df=nav_df)
+        plot_fund_dashboard(df=nav_df, fund_code=fund_code)
 
         time.sleep(2)
