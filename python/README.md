@@ -78,9 +78,9 @@ python/
 - 多因子买卖信号（暴涨过热、暴跌低估、良性上涨、恐慌抛售等 14 种）
 - 4 面板可视化图表
 
-详细信号含义及操作建议见 `使用.txt`。
+详细信号含义及操作建议见 `README.md`。
 
-**依赖：** `akshare`、`matplotlib`、`pandas`
+**依赖：** `akshare`、`matplotlib`、`pandas`、`numpy`、`requests`、`demjson3`、`beautifulsoup4`
 
 ---
 
