@@ -3,6 +3,7 @@
 小说下载（古龙作品）：nunu 书坊（适合外网）/ 古龙武侠网（适合非外网）
 
 - nunu.py / gulongbbs.py 为下载核心，逻辑保持不变。
+- 两个来源统一保存到 Downloads/。
 - 本文件提供两种入口：
     * 图形界面（默认）：选择来源、勾选书目 / 输入代码、实时进度日志
     * 命令行（python main.py --cli）：沿用原交互流程
@@ -10,7 +11,11 @@
 """
 
 import argparse
+import os
+import platform
+import queue
 import re
+import subprocess
 import sys
 import threading
 
@@ -19,6 +24,10 @@ import gulongbbs
 
 NUNU_BASE_URL = "https://www.kanunu8.com"
 NUNU_AUTHOR_URL = "https://www.kanunu8.com/zj/10867.html"
+
+# 统一目录：固定为脚本所在目录下的 Downloads/，不受启动时的当前工作目录影响
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOAD_DIR = os.path.join(SCRIPT_DIR, "Downloads")
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +67,7 @@ def run_nunu():
         print("已取消")
         return 0
     for book in selected_books:
-        nunu.download_book(book)
+        nunu.download_book(book, out_dir=DOWNLOAD_DIR)
     print("\n全部完成")
     return 1
 
@@ -82,7 +91,7 @@ def run_gulongbbs():
         print("已取消")
         return 0
     for book in selected_books:
-        gulongbbs.download_book(book)
+        gulongbbs.download_book(book, out_dir=DOWNLOAD_DIR)
     print("\n全部完成")
     return 1
 
@@ -103,7 +112,7 @@ def run_cli():
 def run_gui():
     import tkinter as tk
     import tkinter.font as tkfont
-    from tkinter import ttk, scrolledtext, messagebox, filedialog
+    from tkinter import ttk, scrolledtext, messagebox
 
     def pick_font(root):
         try:
@@ -118,118 +127,167 @@ def run_gui():
     root = tk.Tk()
     root.title("古龙小说下载")
     FONT = pick_font(root)
-    root.columnconfigure(1, weight=1)
-    root.rowconfigure(4, weight=1)
+    root.minsize(640, 560)
+    root.geometry("640x600")
+
+    # 底部按钮独立容器：先 pack 到底部，保证任何窗口尺寸下都完整可见
+    btn_frame = ttk.Frame(root)
+    btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=8)
+
+    # 主内容区占据剩余空间
+    main_frame = ttk.Frame(root)
+    main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    main_frame.columnconfigure(1, weight=1)
+    main_frame.rowconfigure(2, weight=1)   # 作品列表可拉伸
+    main_frame.rowconfigure(5, weight=1)   # 进度日志可拉伸
 
     source_var = tk.StringVar(value="nunu")
     books_cache = {"nunu": []}
+    log_queue = queue.Queue()
 
     # 来源
-    ttk.Label(root, text="下载源").grid(row=0, column=0, sticky="w", padx=8, pady=6)
-    ttk.Radiobutton(root, text="努努书坊（外网）", variable=source_var, value="nunu").grid(row=0, column=1, sticky="w")
-    ttk.Radiobutton(root, text="古龙武侠网（非外网）", variable=source_var, value="gulongbbs").grid(row=0, column=2, sticky="w")
+    ttk.Label(main_frame, text="下载源").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+    ttk.Radiobutton(main_frame, text="努努书坊（外网）", variable=source_var, value="nunu").grid(
+        row=0, column=1, sticky="w")
+    ttk.Radiobutton(main_frame, text="古龙武侠网（非外网）", variable=source_var, value="gulongbbs").grid(
+        row=0, column=2, sticky="w")
 
     # nunu 作品列表
-    ttk.Label(root, text="作品列表（努努，可多选）").grid(row=1, column=0, columnspan=3, sticky="w", padx=8)
-    list_frame = ttk.Frame(root)
+    ttk.Label(main_frame, text="作品列表（努努，可多选）").grid(
+        row=1, column=0, columnspan=3, sticky="w", padx=8)
+    list_frame = ttk.Frame(main_frame)
     list_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=8)
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
-    book_list = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, font=FONT)
+    book_list = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, font=FONT, height=7)
     book_list.grid(row=0, column=0, sticky="nsew")
     sb = ttk.Scrollbar(list_frame, orient="vertical", command=book_list.yview)
     sb.grid(row=0, column=1, sticky="ns")
     book_list.config(yscrollcommand=sb.set)
 
     # gulong 代码
-    ttk.Label(root, text="书籍代码（古龙武侠网，逗号分隔，如 ssydj,dqjk）").grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
+    ttk.Label(main_frame, text="书籍代码（古龙武侠网，逗号分隔，如 ssydj,dqjk）").grid(
+        row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
     code_var = tk.StringVar()
-    ttk.Entry(root, textvariable=code_var).grid(row=3, column=1, columnspan=2, sticky="ew", padx=8)
+    ttk.Entry(main_frame, textvariable=code_var).grid(
+        row=3, column=1, columnspan=2, sticky="ew", padx=8)
 
     # 日志
-    ttk.Label(root, text="进度日志").grid(row=4, column=0, sticky="w", padx=8)
-    log = scrolledtext.ScrolledText(root, wrap="word", height=12, font=FONT)
-    log.grid(row=5, column=0, columnspan=3, sticky="nsew", padx=8, pady=(0, 8))
+    ttk.Label(main_frame, text=f"进度日志（保存至 {DOWNLOAD_DIR}/）").grid(
+        row=4, column=0, sticky="w", padx=8)
+    log = scrolledtext.ScrolledText(main_frame, wrap="word", height=8, font=FONT)
+    log.grid(row=5, column=0, columnspan=3, sticky="nsew", padx=8, pady=(0, 4))
 
+    # 子线程只往线程安全队列写字符串，绝不接触任何 Tk 对象
     class GuiLog:
         def write(self, msg):
             if msg:
-                root.after(0, self._append, msg)
-        def _append(self, msg):
-            log.insert(tk.END, msg)
-            log.see(tk.END)
+                log_queue.put(str(msg))
         def flush(self):
             pass
 
+    def drain_log():
+        try:
+            while True:
+                msg = log_queue.get_nowait()
+                log.insert(tk.END, msg)
+                log.see(tk.END)
+        except queue.Empty:
+            pass
+        root.after(80, drain_log)
+
+    drain_log()
+
+    def ui(fn, *args):
+        """把 UI 操作调度回主线程执行（Tkinter 只能在主线程触碰）。"""
+        root.after(0, fn, *args)
+
     def fetch_books():
+        # 校验在主线程完成
         if source_var.get() != "nunu":
             messagebox.showinfo("提示", "作品列表仅努努书坊可用；古龙武侠网请直接填书籍代码。")
             return
-        try:
-            html = nunu.get_html(url=NUNU_AUTHOR_URL)
-            books = nunu.parse_books(html, url=NUNU_BASE_URL)
-        except Exception as e:  # noqa
+
+        def fill(books):
+            books_cache["nunu"] = books
+            book_list.delete(0, tk.END)
+            for b in books:
+                book_list.insert(tk.END, b["title"])
+
+        def fail(e):
             messagebox.showerror("获取失败", str(e))
-            return
-        books_cache["nunu"] = books
-        book_list.delete(0, tk.END)
-        for b in books:
-            book_list.insert(tk.END, b["title"])
+
+        def work():
+            try:
+                html = nunu.get_html(url=NUNU_AUTHOR_URL)
+                books = nunu.parse_books(html, url=NUNU_BASE_URL)
+                ui(fill, books)
+            except Exception as e:  # noqa
+                ui(fail, e)
+
+        btn_fetch.config(state="disabled")
+        def run():
+            try:
+                work()
+            finally:
+                ui(lambda: btn_fetch.config(state="normal"))
+        threading.Thread(target=run, daemon=True).start()
 
     def download():
         src = source_var.get()
-        old = sys.stdout
-        sys.stdout = GuiLog()
-        try:
-            if src == "nunu":
-                sel = book_list.curselection()
-                books = [books_cache["nunu"][i] for i in sel]
-                if not books:
-                    messagebox.showwarning("提示", "请在作品列表中勾选要下载的书")
-                    return
-                for b in books:
-                    nunu.download_book(b)
-            else:
-                text = code_var.get().strip()
-                codes = [c.strip() for c in re.split(r"[,，\s]+", text) if c.strip()]
-                if not codes:
-                    messagebox.showwarning("提示", "请填写书籍代码")
-                    return
-                for c in codes:
-                    gulongbbs.download_book(c)
-            print("\n全部完成")
-        except Exception as e:  # noqa
-            print("出错：", e)
-        finally:
-            sys.stdout = old
-
-    def start_thread(target):
-        t = threading.Thread(target=target, daemon=True)
-        t.start()
-
-    ttk.Button(root, text="🔄 获取作品列表", command=lambda: start_thread(fetch_books)).grid(row=6, column=0, padx=8, pady=8)
-    ttk.Button(root, text="⬇ 开始下载", command=lambda: start_thread(download)).grid(row=6, column=1, padx=4, pady=8)
-    ttk.Button(root, text="📂 打开下载目录", command=lambda: _open_dir(root, source_var)).grid(row=6, column=2, padx=4, pady=8)
-
-    root.geometry("640x560")
-    root.mainloop()
-
-
-def _open_dir(root, source_var):
-    import os, subprocess, platform
-    target = "Downloads" if source_var.get() == "nunu" else "Downloads2"
-    if not os.path.isdir(target):
-        target = os.getcwd()
-    try:
-        if platform.system() == "Windows":
-            os.startfile(target)
-        elif platform.system() == "Darwin":
-            subprocess.call(["open", target])
+        # 校验在主线程完成，避免子线程里弹 messagebox
+        if src == "nunu":
+            sel = book_list.curselection()
+            books = [books_cache["nunu"][i] for i in sel]
+            if not books:
+                messagebox.showwarning("提示", "请在作品列表中勾选要下载的书")
+                return
         else:
-            subprocess.call(["xdg-open", target])
-    except Exception as e:  # noqa
-        from tkinter import messagebox
-        messagebox.showerror("打开失败", str(e))
+            text = code_var.get().strip()
+            codes = [c.strip() for c in re.split(r"[,，\s]+", text) if c.strip()]
+            if not codes:
+                messagebox.showwarning("提示", "请填写书籍代码")
+                return
+
+        def run():
+            old = sys.stdout
+            sys.stdout = GuiLog()
+            try:
+                if src == "nunu":
+                    for b in books:
+                        nunu.download_book(b, out_dir=DOWNLOAD_DIR)
+                else:
+                    for c in codes:
+                        gulongbbs.download_book(c, out_dir=DOWNLOAD_DIR)
+                print("\n全部完成")
+            except Exception as e:  # noqa
+                print("出错：", e)
+            finally:
+                sys.stdout = old
+                ui(lambda: btn_download.config(state="normal"))
+
+        btn_download.config(state="disabled")
+        threading.Thread(target=run, daemon=True).start()
+
+    def open_dir():
+        target = DOWNLOAD_DIR if os.path.isdir(DOWNLOAD_DIR) else os.getcwd()
+        try:
+            if platform.system() == "Windows":
+                os.startfile(target)
+            elif platform.system() == "Darwin":
+                subprocess.call(["open", target])
+            else:
+                subprocess.call(["xdg-open", target])
+        except Exception as e:  # noqa
+            messagebox.showerror("打开失败", str(e))
+
+    btn_fetch = ttk.Button(btn_frame, text="🔄 获取作品列表", command=fetch_books)
+    btn_fetch.pack(side=tk.LEFT, padx=(0, 4))
+    btn_download = ttk.Button(btn_frame, text="⬇ 开始下载", command=download)
+    btn_download.pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_frame, text="📂 打开下载目录", command=open_dir).pack(side=tk.LEFT, padx=4)
+
+    root.mainloop()
 
 
 def main():

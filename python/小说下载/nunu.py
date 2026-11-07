@@ -146,7 +146,7 @@ def choose_books(books):
     return selected
 
 # 下载并保存为 txt
-def download_book(book):
+def download_book(book, out_dir="Downloads"):
     book_title = book["title"]
     book_url = book["url"]
     print(f"\n开始处理：{book_title}")
@@ -160,8 +160,8 @@ def download_book(book):
     print(f"章节数量：{len(chapters)}")
 
     filename = safe_filename(book_title) + ".txt"
-    os.makedirs("Downloads", exist_ok=True)
-    save_path = os.path.join("Downloads", filename)
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, filename)
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(book_title)
         f.write("\n")

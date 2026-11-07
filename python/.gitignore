@@ -5,6 +5,7 @@ __pycache__/
 
 # 各工具生成的输出与本地数据
 Downloads/
+# 遗留目录：旧版 gulongbbs 的输出，合并进 Downloads/ 后可删
 Downloads2/
 conversation_*_log.txt
 

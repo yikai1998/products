@@ -1,40 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-外语单词背诵 + 朗读 + 翻译（跨平台：GUI / CLI 两用）
+外语单词抽背（自查）工具：GUI / CLI 两用
 
-核心逻辑保持不变：
-  - 从 wording_en.txt / wording_jp.txt 随机抽取若干单词
-  - 联网翻译（外网用 GoogleTranslator，内网用 translators 的 bing）
-  - 用 pyttsx3 朗读
+用途：从 wording_en.txt / wording_jp.txt 随机抽取单词，自己先想意思，
+      再按需「显示翻译」或「朗读」来核对掌握程度（听力 / 翻译均可自主触发）。
 
 改进：
-  - 语音包不再硬编码 Mac 嗓音，改为按语言自动匹配系统中可用的嗓音（Win/Mac/Linux 均可）
-  - 提供可选的 tkinter 图形界面；无参数运行时默认启动 GUI，--cli 走原命令行流程
-依赖：pyttsx3、deep_translator、translators（pip install pyttsx3 deep_translator translators）
+  - 朗读改用操作系统内置 TTS（Windows PowerShell / macOS say / Linux espeak），
+    以子进程方式调用，不再用 pyttsx3 在主线程里 runAndWait——
+    既消除朗读时的界面卡顿，也彻底避免 pyttsx3 在程序退出时
+    因后台线程触发 PyEval_RestoreThread(GIL) 致命崩溃。
+  - 翻译改为后台线程 + 主线程回调，联网慢也不会冻结界面。
+  - 单词 / 翻译自动换行（随窗口宽度动态设置 wraplength）；底部按钮固定可见。
+  - 不再自动朗读：单词先显示，是否听发音、何时看翻译完全由你点击决定。
+依赖：翻译需要 deep_translator / translators（pip install deep_translator translators）；
+      朗读使用系统自带语音，无需额外安装（Linux 需 espeak）。
 """
 
 import argparse
+import base64
+import os
+import platform
 import random
+import subprocess
+import threading
 
-import pyttsx3
 from deep_translator import GoogleTranslator
 import translators as ts
 
-VOICE_HINTS = {
-    "ja": ["ja", "japanese", "日本語"],
-    "en": ["en", "english", "英文"],
-}
-
-
-def pick_voice(engine, lang: str):
-    """按语言在系统已安装嗓音里挑一个，找不到则返回 None（用默认嗓音）。"""
-    voices = engine.getProperty("voices") or []
-    hints = VOICE_HINTS.get(lang, [])
-    for v in voices:
-        blob = (getattr(v, "id", "") + " " + getattr(v, "name", "")).lower()
-        if any(h in blob for h in hints):
-            return v.id
-    return None
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def get_translation(text: str, internet: str) -> str:
@@ -46,21 +40,76 @@ def get_translation(text: str, internet: str) -> str:
         return f"翻译失败：{e}"
 
 
-def speak(engine, text: str, lang: str):
+_speech_lock = threading.Lock()
+_last_proc = None
+_mac_voices = None
+
+
+def _mac_voice(lang: str):
+    """在 macOS 已安装嗓音里挑一个匹配语言的，找不到返回 None（用默认嗓音）。"""
+    global _mac_voices
+    if _mac_voices is None:
+        try:
+            _mac_voices = subprocess.run(
+                ["say", "-v", "?"], capture_output=True, text=True, timeout=5
+            ).stdout.lower()
+        except Exception:
+            _mac_voices = ""
+    prefer = ("kyoko", "otoya") if lang == "ja" else ("samantha", "alex", "daniel")
+    for v in prefer:
+        if v in _mac_voices:
+            return v.capitalize() if v != "otoya" else "Otoya"
+    return None
+
+
+def speak(text: str, lang: str, block: bool = False):
+    """调用操作系统内置 TTS 朗读（子进程，不阻塞界面，也不会引发 GIL 崩溃）。"""
+    global _last_proc
+    if not text:
+        return
+    sys_name = platform.system()
     try:
-        vid = pick_voice(engine, lang)
-        if vid:
-            engine.setProperty("voice", vid)
-        engine.setProperty("rate", 90)
-        engine.setProperty("volume", 1)
-        engine.say(text)
-        engine.runAndWait()
+        if sys_name == "Windows":
+            culture = "ja-JP" if lang == "ja" else "en-US"
+            safe = text.replace("'", "''")
+            # 用 EncodedCommand 传递脚本，避免中文/日文与引号在命令行上的编码问题
+            ps = (
+                "Add-Type -AssemblyName System.Speech\n"
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+                "try { $s.SelectVoiceByHints([System.Globalization.CultureInfo]::"
+                "GetCultureInfo('%s')) } catch {}\n"
+                "$s.Speak('%s')\n"
+                "$s.Dispose()" % (culture, safe)
+            )
+            encoded = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=0x08000000)  # CREATE_NO_WINDOW
+        elif sys_name == "Darwin":
+            voice = _mac_voice(lang)
+            cmd = ["say", "-v", voice, text] if voice else ["say", text]
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:  # Linux
+            voice = "ja" if lang == "ja" else "en"
+            p = subprocess.Popen(["espeak", "-v", voice, text],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # 连点朗读时，先结束上一段，避免多个 TTS 进程叠加抢音频设备造成卡顿
+        with _speech_lock:
+            if _last_proc is not None and _last_proc.poll() is None:
+                try:
+                    _last_proc.terminate()
+                except Exception:
+                    pass
+            _last_proc = p
+        if block:
+            p.wait(timeout=30)
     except Exception as e:  # noqa
         print(f"朗读失败：{e}")
 
 
 def load_words(lang: str):
-    path = "wording_jp.txt" if lang == "ja" else "wording_en.txt"
+    path = os.path.join(BASE_DIR, "wording_jp.txt" if lang == "ja" else "wording_en.txt")
     with open(path, encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
@@ -70,17 +119,14 @@ def run_cli(lang: str, n: int, internet: str, read_aloud: bool):
     if not (0 < n <= len(words)):
         n = len(words)
     sample = random.sample(words, n)
-    engine = pyttsx3.init() if read_aloud else None
-    print(f"一共抽取 {len(sample)} 个单词")
+    print(f"一共抽取 {len(sample)} 个单词（先自己想意思，回车后再看翻译）")
     for c, w in enumerate(sample, 1):
         print(f"\n{c}/{len(sample)}: {w}")
-        if read_aloud:
-            input("按回车朗读…")
-            speak(engine, w, lang)
         input("按回车显示翻译…")
         print("翻译：", get_translation(w, internet))
-    if engine:
-        engine.stop()
+        if read_aloud:
+            input("按回车朗读…")
+            speak(w, lang, block=True)
     print("\n复习结束")
 
 
@@ -103,41 +149,61 @@ def run_gui():
         return ("TkDefaultFont", 14)
 
     root = tk.Tk()
-    root.title("外语单词背诵")
+    root.title("外语单词抽背")
     FONT = pick_font(root)
-    root.columnconfigure(1, weight=1)
+    root.minsize(520, 380)
+    root.geometry("560x400")
+
+    # 底部按钮独立容器，任何窗口尺寸下都完整可见
+    btn_frame = ttk.Frame(root)
+    btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=8)
+
+    main_frame = ttk.Frame(root)
+    main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    main_frame.columnconfigure(1, weight=1)
+    main_frame.rowconfigure(4, weight=1)
 
     lang_var = tk.StringVar(value="英语")
     net_var = tk.StringVar(value="内网")
     n_var = tk.StringVar(value="10")
     read_var = tk.BooleanVar(value=True)
 
-    ttk.Label(root, text="语言").grid(row=0, column=0, sticky="w", padx=8, pady=6)
-    ttk.Combobox(root, textvariable=lang_var, values=["英语", "日语"], state="readonly", width=12).grid(
-        row=0, column=1, sticky="w")
+    ttk.Label(main_frame, text="语言").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+    ttk.Combobox(main_frame, textvariable=lang_var, values=["英语", "日语"],
+                 state="readonly", width=12).grid(row=0, column=1, sticky="w")
 
-    ttk.Label(root, text="网络环境").grid(row=1, column=0, sticky="w", padx=8, pady=6)
-    ttk.Combobox(root, textvariable=net_var, values=["内网", "外网"], state="readonly", width=12).grid(
-        row=1, column=1, sticky="w")
+    ttk.Label(main_frame, text="网络环境").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+    ttk.Combobox(main_frame, textvariable=net_var, values=["内网", "外网"],
+                 state="readonly", width=12).grid(row=1, column=1, sticky="w")
 
-    ttk.Label(root, text="抽取数量").grid(row=2, column=0, sticky="w", padx=8, pady=6)
-    ttk.Entry(root, textvariable=n_var, width=14).grid(row=2, column=1, sticky="w")
+    ttk.Label(main_frame, text="抽取数量").grid(row=2, column=0, sticky="w", padx=8, pady=6)
+    ttk.Entry(main_frame, textvariable=n_var, width=14).grid(row=2, column=1, sticky="w")
 
-    ttk.Checkbutton(root, text="朗读", variable=read_var).grid(row=3, column=0, columnspan=2, sticky="w", padx=8)
+    ttk.Checkbutton(main_frame, text="启用发音（点击「朗读」时发声）",
+                    variable=read_var).grid(row=3, column=0, columnspan=2, sticky="w", padx=8)
 
     # 展示区
-    word_label = ttk.Label(root, text="", font=(FONT[0], 28), anchor="center")
-    word_label.grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=10)
-    trans_label = ttk.Label(root, text="", font=(FONT[0], 16), foreground="#15539e", anchor="center", wraplength=460)
+    word_label = ttk.Label(main_frame, text="点击「开始」抽取单词",
+                           font=(FONT[0], 28), anchor="center", justify="center")
+    word_label.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=8, pady=10)
+    trans_label = ttk.Label(main_frame, text="", font=(FONT[0], 16), foreground="#15539e",
+                            anchor="center", justify="center")
     trans_label.grid(row=5, column=0, columnspan=3, sticky="ew", padx=8, pady=4)
-    progress_label = ttk.Label(root, text="", foreground="#888")
+    progress_label = ttk.Label(main_frame, text="", foreground="#888")
     progress_label.grid(row=6, column=0, columnspan=3, sticky="e", padx=8)
 
-    state = {"sample": [], "idx": 0, "engine": None}
+    def on_resize(event=None):
+        w = root.winfo_width() - 40
+        if w > 60:
+            word_label.config(wraplength=w)
+            trans_label.config(wraplength=w)
+
+    root.bind("<Configure>", on_resize)
+
+    state = {"sample": [], "idx": 0, "seq": 0}
 
     def start():
         lang = "ja" if lang_var.get() == "日语" else "en"
-        internet = "2" if net_var.get() == "外网" else "1"
         try:
             n = int(n_var.get())
         except ValueError:
@@ -152,8 +218,7 @@ def run_gui():
             n = len(words)
         state["sample"] = random.sample(words, n)
         state["idx"] = 0
-        if read_var.get():
-            state["engine"] = pyttsx3.init()
+        state["seq"] += 1
         trans_label.config(text="")
         show_current()
 
@@ -165,48 +230,56 @@ def run_gui():
         word_label.config(text=s[i])
         trans_label.config(text="")
         progress_label.config(text=f"{i + 1} / {len(s)}")
-        if state["engine"]:
-            speak(state["engine"], s[i], "ja" if lang_var.get() == "日语" else "en")
 
     def reveal():
+        """翻译放后台线程，结果回主线程显示；用序号防止切词后结果串台。"""
         if not state["sample"]:
             return
         internet = "2" if net_var.get() == "外网" else "1"
-        lang = "ja" if lang_var.get() == "日语" else "en"
+        word = state["sample"][state["idx"]]
+        state["seq"] += 1
+        seq = state["seq"]
         trans_label.config(text="翻译中…")
-        root.update_idletasks()
-        trans_label.config(text=get_translation(state["sample"][state["idx"]], internet))
+
+        def work():
+            result = get_translation(word, internet)
+            def apply():
+                if seq == state["seq"]:
+                    trans_label.config(text=result)
+            root.after(0, apply)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def speak_now():
         if not state["sample"]:
             return
-        if not state["engine"]:
-            state["engine"] = pyttsx3.init()
-        speak(state["engine"], state["sample"][state["idx"]], "ja" if lang_var.get() == "日语" else "en")
+        if not read_var.get():
+            messagebox.showinfo("提示", "发音未启用，可在上方勾选「启用发音」")
+            return
+        lang = "ja" if lang_var.get() == "日语" else "en"
+        speak(state["sample"][state["idx"]], lang)
 
     def nxt():
         if not state["sample"]:
             return
         if state["idx"] + 1 < len(state["sample"]):
             state["idx"] += 1
+            state["seq"] += 1
             trans_label.config(text="")
             show_current()
         else:
             messagebox.showinfo("完成", "复习结束 🎉")
-            if state["engine"]:
-                state["engine"].stop()
 
-    ttk.Button(root, text="▶ 开始", command=start).grid(row=7, column=0, padx=8, pady=8)
-    ttk.Button(root, text="🔊 朗读", command=speak_now).grid(row=7, column=1, padx=4)
-    ttk.Button(root, text="👁 显示翻译", command=reveal).grid(row=7, column=2, padx=4)
-    ttk.Button(root, text="➡ 下一词", command=nxt).grid(row=7, column=3, padx=4)
+    ttk.Button(btn_frame, text="▶ 开始", command=start).pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Button(btn_frame, text="👁 显示翻译", command=reveal).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_frame, text="🔊 朗读", command=speak_now).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_frame, text="➡ 下一词", command=nxt).pack(side=tk.LEFT, padx=4)
 
-    root.geometry("520x360")
     root.mainloop()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="外语单词背诵 + 朗读 + 翻译")
+    parser = argparse.ArgumentParser(description="外语单词抽背 + 翻译（+ 可选系统发音）")
     parser.add_argument("--cli", action="store_true", help="使用命令行交互模式（默认启动图形界面）")
     parser.add_argument("--lang", choices=["en", "ja"], default="en")
     parser.add_argument("--n", type=int, default=10)

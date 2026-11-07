@@ -10,9 +10,9 @@
 python/
 ├── AI相关/          与 LLM 对话（OpenAI / Kimi），含 CLI 与 GUI 版
 ├── 办公摸鱼/        企业微信「保活」自动输入（后台自动化，非 GUI）
-├── 外语学习/        外语单词听读 + 翻译（跨平台语音 + GUI/CLI）
-├── 小说下载/        古龙武侠小说批量下载（GUI 启动器 + CLI）
-├── 文件格式转换/    HEIC/HEIF 批量转 JPEG（GUI + 可配置路径）
+├── 外语学习/        外语单词抽背自查（系统 TTS + GUI/CLI）
+├── 小说下载/        古龙武侠小说批量下载（GUI 启动器 + CLI，统一 Downloads/）
+├── 文件格式转换/    图片批量转格式（自选类型 + GUI + 可配置路径）
 ├── 理财/            基金分析与买卖信号（GUI + 可交互走势图）
 ├── 账单计算/        多人 AA 分账计算器（GUI，成员可增删）
 └── 加密文件夹/      Windows 文件夹伪装隐藏（保持原逻辑，未做 UI）
@@ -50,13 +50,14 @@ python/
 
 ### 外语学习
 
-`main.py` — 随机抽取单词卡，朗读 + 翻译。支持英语 / 日语；外网用 GoogleTranslator，内网用 Bing。
+`main.py` — **单词抽背自查**：先显示单词自己想意思，再按需点「显示翻译」或「朗读」核对，掌握程度自己抽查。支持英语 / 日语；外网用 GoogleTranslator，内网用 Bing。
 
-- **跨平台语音**：自动在系统已装嗓音里按语言匹配，不再写死 Mac 嗓音。
-- 图形界面（默认）或 `--cli` 命令行；可设数量、是否朗读、逐词显示翻译。
+- **发音改用系统内置 TTS**（Windows PowerShell / macOS `say` / Linux `espeak`）子进程调用：不阻塞界面，也避免了 `pyttsx3` 退出时的 GIL 致命崩溃；按语言自动选嗓音。
+- 不再自动朗读；单词 / 翻译自动换行（随窗口宽度）；翻译异步不冻结界面；底部按钮固定可见。
+- 图形界面（默认）或 `--cli` 命令行；可设数量、是否启用发音。
 - 单词本：`wording_en.txt` / `wording_jp.txt`（每行一词）。
 
-**依赖：** `pyttsx3`、`deep_translator`、`translators`
+**依赖：** `deep_translator`、`translators`（发音用系统自带，无需额外安装；Linux 需 `espeak`）
 
 ---
 
@@ -65,6 +66,8 @@ python/
 `main.py` — 古龙武侠小说批量抓取并合并为 txt（抓取/解析逻辑在 `nunu.py` / `gulongbbs.py`，未改动）。
 
 - `nunu` 书坊（适合外网）、`gulongbbs` 武侠网（适合非外网）。
+- 两个来源**统一保存到脚本目录下的 `Downloads/`**（绝对路径，不再分 `Downloads2`）；底部按钮固定在窗口底部，默认尺寸下完整可见。
+- 修复线程安全：子线程不再直接操作 Tkinter / 弹窗，改用队列 + 主线程轮询，避免 `PyEval_RestoreThread(GIL)` 致命崩溃。
 - GUI（默认）：选来源、勾书目 / 填代码、实时进度日志；或 `--cli` 沿用原交互。
 
 **依赖：** `requests`、`beautifulsoup4`
@@ -73,8 +76,9 @@ python/
 
 ### 文件格式转换
 
-`main.py` — 批量将 iPhone 的 HEIC/HEIF 转 JPEG，文件名自动规整，保留时间戳。
+`main.py` — 图片批量转格式，文件名自动规整，保留时间戳。
 
+- **转换类型可选**：`HEIC/HEIF → JPG`、`PNG → JPG`、`WEBP → JPG`、`全部图片 → JPG/PNG/WEBP`（界面下拉或 `-t` 参数）；同格式自动跳过。
 - 输入/输出目录可配置（GUI 选文件夹 或 `-i/-o` 参数）。
 - 同名文件默认自动加 `_1/_2` 后缀，避免悄悄覆盖。
 
@@ -118,7 +122,7 @@ python/
 
 ```bash
 # 各模块按需安装依赖，例如：
-pip install openai pyautogui pyttsx3 deep_translator translators \
+pip install openai pyautogui deep_translator translators \
             requests beautifulsoup4 Pillow pillow-heif \
             akshare pandas numpy matplotlib demjson3
 

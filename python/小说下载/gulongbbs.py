@@ -170,7 +170,7 @@ def crawl_chapter(start_url):
     return "\n\n".join(all_text)
 
 
-def download_book(book):
+def download_book(book, out_dir="Downloads"):
     """
     下载一本书。
     book 示例：
@@ -196,10 +196,10 @@ def download_book(book):
 
     print(f"章节数量：{len(chapters)}")
 
-    os.makedirs("Downloads2", exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
 
     filename = safe_filename(book_title) + ".txt"
-    save_path = os.path.join("Downloads2", filename)
+    save_path = os.path.join(out_dir, filename)
 
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(book_title)
@@ -242,6 +242,7 @@ def download_book(book):
 
 
 if __name__ == "__main__":
-    download_book("ssydj")
-    # download_book("dqjk")
-    # download_book("tddh")
+    _out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Downloads")
+    download_book("ssydj", out_dir=_out)
+    # download_book("dqjk", out_dir=_out)
+    # download_book("tddh", out_dir=_out)
