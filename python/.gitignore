@@ -1,0 +1,20 @@
+# 运行时产物 / 缓存
+__pycache__/
+*.pyc
+*.log
+
+# 各工具生成的输出与本地数据
+Downloads/
+Downloads2/
+conversation_*_log.txt
+
+# 理财：个人自选名单与抓取缓存（已在 理财/ 内单独忽略，这里兜底）
+理财/funds.json
+理财/基金代码名单_*.txt
+理财/*基金代码*/
+理财/走势图.html
+
+# 虚拟环境
+.venv/
+venv/
+env/

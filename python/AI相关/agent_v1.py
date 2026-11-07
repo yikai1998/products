@@ -1,10 +1,11 @@
-# coding=gbk
+# -*- coding: utf-8 -*-
+import os
 
 from openai import OpenAI
 import datetime
 
-# Initialize the OpenAI client
-api_key = 'xxx'  # Better to use environment variables
+# Initialize the OpenAI client（优先用环境变量 OPENAI_API_KEY）
+api_key = os.environ.get('OPENAI_API_KEY', 'xxx')
 llm = OpenAI(api_key=api_key)
 
 # Note: 'claude-3-7-sonnet' is an Anthropic model, not OpenAI

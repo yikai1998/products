@@ -1,5 +1,5 @@
-# coding=gbk
-
+# -*- coding: utf-8 -*-
+import os
 import tkinter as tk
 from tkinter import scrolledtext, ttk  # scrolledtext: A Tkinter widget that provides a text area with scrollbars. ttk: Themed Tkinter widgets that look more modern
 import threading  # Allows running processes in parallel (prevents UI freezing)
@@ -8,17 +8,15 @@ from openai import OpenAI
 
 
 class ChatbotGUI:
-    def __init__(self, root, key='your-ai-key', model='gpt-3.5-turbo'):
+    def __init__(self, root, key=None, model='gpt-3.5-turbo'):
         # Set the window title, size, and background color
         self.root = root
         self.root.title('AI Assistant Chat')
         self.root.geometry('1200x900')
-        self.root.attributes('-topmost', True)
-        mac.after(2000, lambda: mac.attributes('-topmost', False))
         self.root.configure(bg='#f0f0f0')  # light gray
 
-        # Initialize OpenAI client
-        self.api_key = key  # Better to use environment variables
+        # Initialize OpenAI client（优先用环境变量 OPENAI_API_KEY）
+        self.api_key = key or os.environ.get('OPENAI_API_KEY', 'your-ai-key')
         self.llm = OpenAI(api_key=self.api_key)
         self.model_name = model  # Using OpenAI model
 
@@ -44,7 +42,7 @@ class ChatbotGUI:
         self.chat_history = scrolledtext.ScrolledText(
             history_frame,
             wrap=tk.WORD,  # wraps text at word boundaries
-            bg='#5350e6',  # blue purple
+            bg='#ffffff',  # 白底，保证文字清晰可读
             font=('Arial', self.font_size),
             borderwidth=1,
             relief='solid'

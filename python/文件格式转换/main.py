@@ -1,93 +1,173 @@
-# coding=gbk
+# -*- coding: utf-8 -*-
+"""
+æ–‡ä»¶æ ¼å¼è½¬æ¢ï¼šæŠŠ HEIC / HEIF ç…§ç‰‡æ‰¹é‡è½¬æˆ JPEGï¼Œå¹¶æ¸…æ´—æ–‡ä»¶åã€‚
+
+åŸé€»è¾‘ä¿ç•™ï¼šHEIC/HEIF -> JPEG(quality=95) + æ–‡ä»¶åè§„æ•´ï¼ˆç©ºæ ¼/è¿å­—ç¬¦/ç‰¹æ®Šå­—ç¬¦ -> ä¸‹åˆ’çº¿ï¼‰ã€‚
+æ”¹è¿›ï¼š
+  - æºç è½¬ UTF-8ï¼ˆåŸ GBKï¼ŒGitHub ä¸Šä¸­æ–‡ä¼šä¹±ç ï¼‰
+  - è¾“å…¥/è¾“å‡ºç›®å½•å¯é…ç½®ï¼ˆå‘½ä»¤è¡Œå‚æ•° æˆ– å›¾å½¢ç•Œé¢é€‰æ‹©ï¼‰ï¼Œä¸å†ç¡¬ç¼–ç  F:\
+  - åŒåæ–‡ä»¶å®‰å…¨å¤„ç†ï¼šé»˜è®¤è‡ªåŠ¨åŠ  _1/_2 åç¼€ï¼Œé¿å…æ‚„æ‚„è¦†ç›–
+  - å¯é€‰ç®€æ˜“ tkinter ç•Œé¢ï¼ˆæ–‡ä»¶å¤¹é€‰æ‹© + æ—¥å¿—ï¼‰
+ä¾èµ–ï¼šPillowã€pillow-heifï¼ˆpip install Pillow pillow-heifï¼‰ï¼›tqdm ä¸ tkinter å‡ä¸ºå¯é€‰ã€‚
+"""
+
+import argparse
+import os
+import re
+import shutil
+import sys
 
 from PIL import Image
 from pillow_heif import register_heif_opener
-import os
-import shutil
-from tqdm import tqdm
-import re
 
 register_heif_opener()
 
-# ÉèÖÃÎÄ¼ş¼Ğ
-input_folder = r"F:\ÎÒµÄĞÅÏ¢"  # ÊäÈëÎÄ¼ş¼Ğ
-output_folder = r"F:\ÎÒµÄĞÅÏ¢"  # Êä³öÎÄ¼ş¼Ğ
+INPUT_EXTS = (".heic", ".heif")
+OUTPUT_EXT = ".jpg"
+SUPPORT_TQDM = False
+try:
+    from tqdm import tqdm
+    SUPPORT_TQDM = True
+except Exception:
+    pass
 
-# È·±£Êä³öÎÄ¼ş¼Ğ´æÔÚ
-os.makedirs(output_folder, exist_ok=True)
 
-
-def clean_filename(filename):
+def clean_filename(filename: str) -> str:
+    """è§„æ•´æ–‡ä»¶åï¼š
+    - ç©ºæ ¼ -> ä¸‹åˆ’çº¿
+    - è¿ç»­è¿å­—ç¬¦ -> å•ä¸ªä¸‹åˆ’çº¿
+    - é(å­—æ¯/æ•°å­—/ä¸­æ–‡/ä¸‹åˆ’çº¿) -> ä¸‹åˆ’çº¿
+    - åˆå¹¶è¿ç»­ä¸‹åˆ’çº¿ -> å•ä¸ª
+    - å»æ‰é¦–å°¾ä¸‹åˆ’çº¿
     """
-    ÇåÀíÎÄ¼şÃû£º
-    - ¿Õ¸ñ -> ÏÂ»®Ïß
-    - Á¬Ğøºá¸Ü -> µ¥¸öÏÂ»®Ïß
-    - ÌØÊâ×Ö·û -> ÏÂ»®Ïß
-    - ¶à¸öÏÂ»®Ïß -> µ¥¸öÏÂ»®Ïß
-    - È¥³ıÊ×Î²ÏÂ»®Ïß
-    """
-    # ·ÖÀëÎÄ¼şÃûºÍÀ©Õ¹Ãû
     name, ext = os.path.splitext(filename)
-
-    # Ìæ»»¹æÔò
-    name = name.replace(" ", "_")  # ¿Õ¸ñ -> ÏÂ»®Ïß
-    name = re.sub(r"-+", "_", name)  # Á¬Ğøºá¸Ü -> µ¥¸öÏÂ»®Ïß
-    name = re.sub(r"[^\w\u4e00-\u9fa5]", "_", name)  # ÌØÊâ×Ö·û£¨±£ÁôÖĞÎÄ¡¢×ÖÄ¸¡¢Êı×Ö¡¢ÏÂ»®Ïß£©
-    name = re.sub(r"_+", "_", name)  # ¶à¸öÏÂ»®Ïß -> µ¥¸ö
-    name = name.strip("_")  # È¥³ıÊ×Î²ÏÂ»®Ïß
-
-    # ·ÀÖ¹ÇåÀíºóÎª¿Õ
+    name = name.replace(" ", "_")
+    name = re.sub(r"-+", "_", name)
+    name = re.sub(r"[^\w\u4e00-\u9fa5]", "_", name)
+    name = re.sub(r"_+", "_", name)
+    name = name.strip("_")
     if not name:
         name = "unnamed"
+    return name + ext
 
-    return name
+
+def _unique_path(output_path: str, overwrite: bool):
+    """è‹¥ç›®æ ‡å·²å­˜åœ¨ï¼šoverwrite=True ç›´æ¥è¦†ç›–ï¼›å¦åˆ™è¿½åŠ  _1/_2 åç¼€ã€‚"""
+    if overwrite or not os.path.exists(output_path):
+        return output_path
+    base, ext = os.path.splitext(output_path)
+    i = 1
+    while os.path.exists(f"{base}_{i}{ext}"):
+        i += 1
+    return f"{base}_{i}{ext}"
 
 
-# »ñÈ¡ËùÓĞ HEIC/HEIF ÎÄ¼ş
-image_files = [f for f in os.listdir(input_folder)
-               if f.lower().endswith((".heic", ".heif"))]
+def convert_folder(input_folder: str, output_folder: str, overwrite: bool = False, log=print):
+    os.makedirs(output_folder, exist_ok=True)
+    files = [f for f in os.listdir(input_folder) if f.lower().endswith(INPUT_EXTS)]
+    if not files:
+        log(f"åœ¨ {input_folder} æœªæ‰¾åˆ° HEIC/HEIF æ–‡ä»¶ã€‚")
+        return 0, 0
 
-converted_count = 0
-skipped_count = 0
+    iterator = tqdm(files, desc="è½¬æ¢ä¸­") if SUPPORT_TQDM and log is print else files
+    converted = skipped = 0
+    for filename in iterator:
+        in_path = os.path.join(input_folder, filename)
+        clean = clean_filename(os.path.splitext(filename)[0]) + OUTPUT_EXT
+        out_path = _unique_path(os.path.join(output_folder, clean), overwrite)
+        try:
+            img = Image.open(in_path)
+            img.convert("RGB").save(out_path, "JPEG", quality=95)
+            shutil.copystat(in_path, out_path)
+            tag = " (è¦†ç›–)" if out_path == os.path.join(output_folder, clean) and os.path.exists(out_path) else ""
+            log(f"âœ“ {filename} -> {os.path.basename(out_path)}{tag}")
+            converted += 1
+        except Exception as e:  # noqa
+            log(f"âœ— {filename} å¤±è´¥ï¼š{e}")
+            skipped += 1
+    log(f"\nè½¬æ¢å®Œæˆï¼šæˆåŠŸ {converted} ä¸ªï¼Œå¤±è´¥ {skipped} ä¸ªã€‚")
+    return converted, skipped
 
-# ÅúÁ¿×ª»»£¨´ø½ø¶ÈÌõ£©
-for filename in tqdm(image_files, desc="×ª»»½ø¶È"):
-    input_path = os.path.join(input_folder, filename)
 
-    # ÇåÀíÎÄ¼şÃû£¨²»º¬À©Õ¹Ãû£©
-    clean_name = clean_filename(os.path.splitext(filename)[0])
+# ---------------------------------------------------------------------------
+# å›¾å½¢ç•Œé¢
+# ---------------------------------------------------------------------------
+def run_gui():
+    import tkinter as tk
+    import tkinter.font as tkfont
+    from tkinter import ttk, filedialog, scrolledtext, messagebox
 
-    # Éú³ÉÊä³öÎÄ¼şÃû
-    output_filename = clean_name + ".jpg"
-    output_path = os.path.join(output_folder, output_filename)
+    def pick_font(root):
+        try:
+            fams = set(tkfont.families(root))
+        except Exception:
+            return ("Microsoft YaHei", 12)
+        for f in ("Microsoft YaHei", "PingFang SC", "Heiti SC", "SimHei", "Noto Sans CJK SC", "Arial"):
+            if f in fams:
+                return (f, 12)
+        return ("TkDefaultFont", 12)
 
-    # ·À¸²¸Ç´¦Àí£ºÈç¹ûÎÄ¼şÒÑ´æÔÚ£¬Ìí¼ÓĞòºÅ
-    # counter = 1
-    # original_clean_name = clean_name
-    # while os.path.exists(output_path):
-    #     output_filename = f"{original_clean_name}_{counter}.jpg"
-    #     output_path = os.path.join(output_folder, output_filename)
-    #     counter += 1
+    def choose(which):
+        d = filedialog.askdirectory()
+        if d:
+            (in_var if which == "in" else out_var).set(d)
 
-    try:
-        # ´ò¿ª¡¢×ª»»¡¢±£´æ
-        img = Image.open(input_path)
-        rename_info = ""
-        if os.path.exists(output_path):
-            rename_info = f" (¸²¸ÇÖØÃûÎÄ¼ş)"
-        img.convert("RGB").save(output_path, "JPEG", quality=95)
+    def start():
+        inf, outf = in_var.get(), out_var.get()
+        if not inf or not outf:
+            messagebox.showwarning("æç¤º", "è¯·å…ˆé€‰æ‹©è¾“å…¥å’Œè¾“å‡ºæ–‡ä»¶å¤¹")
+            return
+        log_area.delete("1.0", tk.END)
 
-        # ±£ÁôÔ­Ê¼ÎÄ¼şµÄĞŞ¸ÄÊ±¼ä
-        shutil.copystat(input_path, output_path)
+        class _Log:
+            @staticmethod
+            def write(msg):
+                log_area.insert(tk.END, msg + "\n")
+                log_area.see(tk.END)
 
-        # ÏÔÊ¾½á¹û
-        tqdm.write(f"Íê³É: {filename} -> {output_filename}{rename_info}")
-        converted_count += 1
+        convert_folder(inf, outf, overwrite=overwrite_var.get(), log=_Log.write)
 
-    except Exception as e:
-        tqdm.write(f"Ê§°Ü: {filename} - {e}")
-        skipped_count += 1
+    root = tk.Tk()
+    root.title("HEIC/HEIF â†’ JPEG æ‰¹é‡è½¬æ¢")
+    FONT = pick_font(root)
+    root.columnconfigure(1, weight=1)
 
-print(f"\n{'=' * 40}")
-print(f"×ª»»Íê³É: {converted_count} ¸ö")
-print(f"Ìø¹ıµÄ  : {skipped_count} ¸ö")
+    in_var, out_var = tk.StringVar(), tk.StringVar()
+    overwrite_var = tk.BooleanVar(value=False)
+
+    ttk.Label(root, text="è¾“å…¥æ–‡ä»¶å¤¹").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+    ttk.Entry(root, textvariable=in_var).grid(row=0, column=1, sticky="ew", padx=6)
+    ttk.Button(root, text="æµè§ˆ", command=lambda: choose("in")).grid(row=0, column=2, padx=6)
+
+    ttk.Label(root, text="è¾“å‡ºæ–‡ä»¶å¤¹").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+    ttk.Entry(root, textvariable=out_var).grid(row=1, column=1, sticky="ew", padx=6)
+    ttk.Button(root, text="æµè§ˆ", command=lambda: choose("out")).grid(row=1, column=2, padx=6)
+
+    ttk.Checkbutton(root, text="è¦†ç›–åŒåæ–‡ä»¶ï¼ˆä¸å‹¾åˆ™è‡ªåŠ¨åŠ  _1/_2 åç¼€ï¼‰", variable=overwrite_var).grid(
+        row=2, column=0, columnspan=3, sticky="w", padx=8, pady=4)
+
+    ttk.Button(root, text="â–¶ å¼€å§‹è½¬æ¢", command=start).grid(row=3, column=0, columnspan=3, pady=8)
+
+    log_area = scrolledtext.ScrolledText(root, wrap="word", height=14)
+    log_area.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=8, pady=(0, 8))
+    root.rowconfigure(4, weight=1)
+
+    root.geometry("640x460")
+    root.mainloop()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="HEIC/HEIF -> JPEG æ‰¹é‡è½¬æ¢")
+    parser.add_argument("-i", "--input", help="è¾“å…¥æ–‡ä»¶å¤¹ï¼ˆå« HEIC/HEIFï¼‰")
+    parser.add_argument("-o", "--output", help="è¾“å‡ºæ–‡ä»¶å¤¹")
+    parser.add_argument("--overwrite", action="store_true", help="è¦†ç›–åŒåæ–‡ä»¶ï¼ˆé»˜è®¤è‡ªåŠ¨åŠ åç¼€ï¼‰")
+    args = parser.parse_args()
+
+    if args.input and args.output:
+        convert_folder(args.input, args.output, overwrite=args.overwrite)
+    else:
+        run_gui()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,3 @@
-# coding=gbk
 import re
 import pandas as pd
 import akshare as ak  # 相关数据接口，读基金各种信息

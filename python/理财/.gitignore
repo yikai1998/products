@@ -1,0 +1,26 @@
+# ---- Python 通用 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.Python
+build/
+dist/
+
+# ---- 个人数据：自选基金名单 + 抓取生成的各基金目录（含 CSV/HTML/PNG）----
+# 这些由程序在本地运行时生成，含个人隐私（持仓/自选），不应入库。
+funds.json
+基金代码名单_*.txt
+*基金代码*/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/

@@ -1,5 +1,5 @@
-# coding=gbk
-
+# -*- coding: utf-8 -*-
+import os
 import tkinter as tk
 from tkinter import scrolledtext, ttk  # scrolledtext: A Tkinter widget that provides a text area with scrollbars. ttk: Themed Tkinter widgets that look more modern
 import threading  # Allows running processes in parallel (prevents UI freezing)
@@ -7,26 +7,25 @@ from datetime import datetime
 from openai import OpenAI
 
 """
-在同一时间内，系统只能处理一个请求
-在一分钟内，你最多可以发送3个请求
-在一分钟内，你最多可以处理32000个 Tokens
-在一天内，你最多可以处理1500000个 Tokens
+Kimi（Moonshot）接口限制（仅作参考，以官方为准）：
+  - 同一时刻系统只能处理一个请求
+  - 一分钟内最多发送 3 个请求
+  - 一分钟内最多处理 32000 个 Tokens
+  - 一天内最多处理 1500000 个 Tokens
 """
 
 
 class ChatbotGUI:
-    def __init__(self, root, key='sk-key-https://platform.moonshot.cn/console/api-keys', model='moonshot-v1-8k'):
+    def __init__(self, root, key=None, model='moonshot-v1-8k'):
         # Set the window title, size, and background color
         self.root = root
         self.root.title('AI Assistant Chat')
         self.root.geometry('1200x900')
-        self.root.attributes('-topmost', True)
-        mac.after(2000, lambda: mac.attributes('-topmost', False))
         self.root.configure(bg='#f0f0f0')  # light gray
 
-        # Initialize Kimi client
+        # Initialize Kimi client（优先用环境变量 MOONSHOT_API_KEY）
         self.llm = OpenAI(
-            api_key=key,
+            api_key=key or os.environ.get('MOONSHOT_API_KEY', 'your-moonshot-key'),
             base_url="https://api.moonshot.cn/v1",
         )
         self.model_name = model  # Using Kimi model
@@ -38,7 +37,7 @@ class ChatbotGUI:
         # Initialize conversation history
         self.conversation_history = [
             {"role": "system",
-             "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"}
+             "content": "浣犳槸 Kimi锛岀敱 Moonshot AI 鎻愪緵鐨勪汉宸ユ櫤鑳藉姪鎵嬶紝浣犳洿鎿呴暱涓�鏂囧拰鑻辨枃鐨勫�硅瘽銆備綘浼氫负鐢ㄦ埛鎻愪緵瀹夊叏锛屾湁甯�鍔╋紝鍑嗙‘鐨勫洖绛斻�傚悓鏃讹紝浣犱細鎷掔粷涓�鍒囨秹鍙婃亹鎬栦富涔夛紝绉嶆棌姝ц�嗭紝榛勮壊鏆村姏绛夐棶棰樼殑鍥炵瓟銆侻oonshot AI 涓轰笓鏈夊悕璇嶏紝涓嶅彲缈昏瘧鎴愬叾浠栬��瑷�銆�"}
         ]
 
         # Create the main frame
@@ -56,7 +55,7 @@ class ChatbotGUI:
         self.chat_history = scrolledtext.ScrolledText(
             history_frame,
             wrap=tk.WORD,  # wraps text at word boundaries
-            bg='#5350e6',  # blue purple
+            bg='#ffffff',  # 白底，保证文字清晰可读
             font=('Arial', self.font_size),
             borderwidth=1,
             relief='solid'
