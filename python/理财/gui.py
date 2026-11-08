@@ -2,9 +2,9 @@
 """
 基金走势分析 · 图形界面
 ======================
-用 funds.json 管理自选基金，并与「基金代码名单_*.txt」双向同步：
-  - UI 里增 / 删 / 改分类 → 同时写回 funds.json 和各分类 txt；
-  - 你手动在 txt 里加的代码 → 下次打开 UI 自动读进来（保留已跑过的更新/信号）。
+用 funds.json 作为唯一权威源管理自选基金（不再使用 txt 名单）：
+  - UI 里增 / 删 / 改分类 → 写回 funds.json；
+  - 你也可以直接编辑 funds.json 手动增删基金，下次打开或点「刷新名称」自动生效。
 
 功能：
   - 按基金代码添加（自动联网查名称与类型）、删除、分类
@@ -58,61 +58,46 @@ def save_categories(cats: list):
 
 
 # ----------------------------------------------------------------------------
-# 名单：funds.json 为权威源（含运行信息），txt 为可读镜像，双向同步
+# 名单：funds.json 为唯一权威源（含运行信息）。已弃用 txt 名单，所有读写只针对 json。
 # ----------------------------------------------------------------------------
-def _read_txt_codes():
-    """扫描所有 基金代码名单_*.txt，返回 {code: (name, category)}。"""
-    result = {}
-    if not os.path.isdir(BASE):
-        return result
-    for fn in os.listdir(BASE):
-        if fn.startswith("基金代码名单_") and fn.endswith(".txt"):
-            cat = fn[len("基金代码名单_"):-len(".txt")]
-            try:
-                with open(os.path.join(BASE, fn), encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        parts = line.split()
-                        code = parts[0].zfill(6)
-                        name = parts[1] if len(parts) > 1 else ""
-                        result[code] = (name, cat)
-            except Exception:
-                continue
-    return result
-
-
 def load_list():
-    """加载名单，并把 txt 中新增/缺名的代码并入（保留 json 中的运行信息）。"""
+    """加载名单（funds.json 为唯一权威源）。代码统一补零到 6 位并去重
+    （如 110→000110），避免重复。"""
     items = []
     if os.path.exists(LIST_PATH):
-        with open(LIST_PATH, encoding="utf-8") as f:
-            items = json.load(f)
-    existing = {it["code"]: it for it in items}
-    for code, (name, cat) in _read_txt_codes().items():
-        if code in existing:
-            if not existing[code].get("name") and name:
-                existing[code]["name"] = name
+        try:
+            with open(LIST_PATH, encoding="utf-8") as f:
+                items = json.load(f)
+        except Exception:
+            items = []
+    # 归一化代码 + 去重，避免 110 / 000110 被当成两只基金
+    norm = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        code = str(it.get("code", "")).strip().zfill(6)
+        it["code"] = code
+        if code in norm:
+            # 合并：用信息更全的一方填补空缺字段
+            for k, v in it.items():
+                if v not in (None, "", "-") and norm[code].get(k) in (None, "", "-"):
+                    norm[code][k] = v
         else:
-            existing[code] = {"code": code, "name": name, "category": cat}
-    items = list(existing.values())
-    save_list(items)  # 把合并结果落盘
+            norm[code] = it
+    items = list(norm.values())
+    save_list(items)  # 归一化后落盘
     return items
 
 
 def save_list(items):
-    """同时写 funds.json 与各分类 txt（双向同步）。"""
-    with open(LIST_PATH, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
-    by_cat = {}
+    """把名单写入 funds.json（唯一权威源）。代码统一补零到 6 位。"""
+    norm_items = []
     for it in items:
-        by_cat.setdefault(it.get("category", "其它"), []).append(it)
-    for cat, lst in by_cat.items():
-        p = os.path.join(BASE, f"基金代码名单_{cat}.txt")
-        with open(p, "w", encoding="utf-8") as f:
-            for it in lst:
-                f.write(f"{it['code']}\t{it.get('name', '')}\n")
+        it = dict(it)
+        it["code"] = str(it.get("code", "")).strip().zfill(6)
+        norm_items.append(it)
+    with open(LIST_PATH, "w", encoding="utf-8") as f:
+        json.dump(norm_items, f, ensure_ascii=False, indent=2)
 
 
 # ----------------------------------------------------------------------------
@@ -127,6 +112,9 @@ class FundApp:
         self.items = load_list()
         self.q = queue.Queue()
         self.worker = None
+        self.sort_key = None          # 当前排序列（None = 按自定义/手动顺序）
+        self.sort_reverse = False
+        self.drag_item = None         # 拖拽中的行（自定义排序）
 
         self._build_ui()
         self._refresh_tree()
@@ -149,11 +137,16 @@ class FundApp:
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=6, fill=tk.Y)
         ttk.Button(top, text="🔁 转移分类", command=self._transfer_category).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="🏷 管理分类", command=self._manage_categories).pack(side=tk.LEFT, padx=3)
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=6, fill=tk.Y)
+        ttk.Button(top, text="↺ 清除排序", command=self._clear_sort).pack(side=tk.LEFT, padx=3)
+        self.sort_var = tk.StringVar(value="顺序：自定义（拖拽行可调整）")
+        ttk.Label(top, textvariable=self.sort_var, foreground="#1a73e8").pack(side=tk.LEFT, padx=4)
 
         hint = ttk.Label(
             self.root,
             text="默认每次都联网抓最新净值；断网时勾“离线模式”只读本地缓存。多选后点“开始分析选中”批量跑；"
                  "单选一只并“设今日预测”可对该基金单独预测。双击某行打开报告；鼠标悬停某行看详情。"
+                 "点击任意列头可按该列排序（再点切换升/降序）；上下拖动行可自定义顺序，松手即保存为默认顺序。"
                  "报告里的「走势图.html」支持顶部日期筛选（From/To）与上下两图滑块联动，指数基金额外显示跟踪指数 PE 分位。",
             foreground="#666",
         )
@@ -170,12 +163,16 @@ class FundApp:
         widths = {"code": 78, "name": 230, "category": 60, "type": 70, "latest_nav": 80,
                   "valuation": 80, "signal": 150, "predict": 60, "updated": 100}
         for c in cols:
-            self.tree.heading(c, text=headers[c])
+            self.tree.heading(c, text=headers[c], command=lambda c=c: self._on_heading_click(c))
             self.tree.column(c, width=widths[c], anchor=tk.CENTER if c not in ("name", "signal") else tk.W)
         self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
         self.tree.bind("<Double-1>", lambda e: self._open_selected())
         self.tree.bind("<Motion>", self._on_motion)
         self.tree.bind("<Leave>", lambda e: self._hide_tip())
+        # 自定义排序：拖拽行（与双击打开报告不冲突：移动打断双击）
+        self.tree.bind("<ButtonPress-1>", self._on_press)
+        self.tree.bind("<B1-Motion>", self._on_drag)
+        self.tree.bind("<ButtonRelease-1>", self._on_release)
 
         # 日志
         bottom = ttk.Frame(self.root, padding=(8, 0, 8, 8))
@@ -186,9 +183,14 @@ class FundApp:
 
     # ---- 列表刷新 ----
     def _refresh_tree(self):
+        if self.sort_key:
+            ordered = sorted(self.items, key=lambda it: self._cell_sort_key(self.sort_key, it),
+                             reverse=self.sort_reverse)
+        else:
+            ordered = self.items
         for row in self.tree.get_children():
             self.tree.delete(row)
-        for it in self.items:
+        for it in ordered:
             pred = it.get("predict_today")
             pred_txt = "" if pred is None else f"{pred:+.2f}"
             self.tree.insert(
@@ -197,6 +199,99 @@ class FundApp:
                         it.get("latest_nav", "-"), it.get("valuation", "-"),
                         it.get("signal", "-"), pred_txt, it.get("updated", "-")),
             )
+
+    # ---- 排序 / 自定义顺序 ----
+    def _on_heading_click(self, col):
+        """点击列头排序：同列再次点击切换升/降序，换列则重置为升序。"""
+        if self.sort_key == col:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_key = col
+            self.sort_reverse = False
+        self._refresh_tree()
+        self._update_sort_label()
+
+    def _clear_sort(self):
+        """取消列排序，回到用户自定义的手动顺序。"""
+        self.sort_key = None
+        self.sort_reverse = False
+        self._refresh_tree()
+        self._update_sort_label()
+
+    def _update_sort_label(self):
+        if not self.sort_key:
+            self.sort_var.set("顺序：自定义（拖拽行可调整）")
+            return
+        headers = {"code": "代码", "name": "名称", "category": "分类", "type": "类型",
+                   "latest_nav": "最新净值", "valuation": "估值分位", "signal": "估值结论",
+                   "predict": "预测%", "updated": "上次更新"}
+        arrow = "↓降序" if self.sort_reverse else "↑升序"
+        self.sort_var.set(f"已按「{headers.get(self.sort_key, self.sort_key)}」{arrow}")
+
+    @staticmethod
+    def _cell_sort_key(col, it):
+        """返回排序用的 (rank, value) 元组：rank=0 有值排前面，rank=1 缺失排最后。"""
+        if col == "valuation":
+            v = it.get("valuation")
+            return (0, float(v)) if isinstance(v, (int, float)) else (1, 0.0)
+        if col == "latest_nav":
+            v = it.get("latest_nav")
+            try:
+                return (0, float(v))
+            except (TypeError, ValueError):
+                return (1, 0.0)
+        if col == "predict":
+            v = it.get("predict_today")
+            return (0, float(v)) if isinstance(v, (int, float)) else (1, 0.0)
+        if col == "signal":
+            order = {"严重高估": 0, "高估": 1, "估值偏高": 2, "合理": 3,
+                     "估值偏低": 4, "低估": 5, "严重低估": 6}
+            s = it.get("signal", "-")
+            return (0, order.get(s, 7)) if s in order else (1, 0)
+        v = it.get(col, "")
+        return (0, str(v))
+
+    # ---- 拖拽自定义排序 ----
+    def _on_press(self, event):
+        self.drag_item = self.tree.identify_row(event.y)
+
+    def _on_drag(self, event):
+        if self.drag_item is None:
+            return
+        # 拖动时高亮目标行，给出视觉反馈（ttk 行背景 tag）
+        row = self.tree.identify_row(event.y)
+        if row and row != self.drag_item:
+            try:
+                self.tree.tag_configure("__drag__", background="#e3f2fd")
+                for r in self.tree.get_children():
+                    self.tree.item(r, tags=())
+                self.tree.item(row, tags=("__drag__",))
+            except Exception:
+                pass
+
+    def _on_release(self, event):
+        di = self.drag_item
+        self.drag_item = None
+        if di is None:
+            return
+        target = self.tree.identify_row(event.y)
+        # 清掉拖拽高亮
+        for r in self.tree.get_children():
+            self.tree.item(r, tags=())
+        if not target or target == di:
+            return
+        # 进入自定义顺序：清除列排序，按当前界面顺序重排 self.items 并保存
+        self.sort_key = None
+        children = list(self.tree.get_children())
+        codes_order = [c for c in children if c != di]
+        insert_at = codes_order.index(target)
+        codes_order.insert(insert_at, di)
+        by_code = {it["code"]: it for it in self.items}
+        self.items = [by_code[c] for c in codes_order]
+        save_list(self.items)
+        self._update_sort_label()
+        self._refresh_tree()
+        self._log(f"已调整顺序（{di} 移到 {target} 之前），已保存为默认顺序")
 
     def _log(self, msg):
         self.log.configure(state=tk.NORMAL)
@@ -227,9 +322,13 @@ class FundApp:
             self.items = [i for i in self.items if i["code"] != code]
         save_list(self.items)
         self._refresh_tree()
-        self._log(f"已删除 {len(sel)} 只基金（funds.json 与对应 txt 已同步）")
+        self._log(f"已删除 {len(sel)} 只基金（已写入 funds.json）")
 
     def _refresh_names(self):
+        # funds.json 是唯一权威源：先重新读取（拾取你手动在 json 里新增的代码），
+        # 再按 id 联网刷新名称与类型
+        self.items = load_list()
+        self._refresh_tree()
         sel = self.tree.selection() or [i["code"] for i in self.items]
         for code in sel:
             try:
@@ -274,16 +373,16 @@ class FundApp:
                     if it["code"] == code:
                         it["category"] = target
                         moved += 1
-            save_list(self.items)  # 内部会按新分类重写各 txt
+            save_list(self.items)  # 内部按新分类写回 funds.json
             self._refresh_tree()
             self._log(f"已将 {moved} 只基金转移到「{target}」")
 
     def _manage_categories(self):
-        """重命名 / 新增 / 删除分类标签（改动同步到 funds.json 与各 txt 文件名）。"""
+        """重命名 / 新增 / 删除分类标签（改动写回 funds.json 与 categories.json）。"""
         dlg = CategoryManageDialog(self.root, self.items)
         self.root.wait_window(dlg.top)
         if dlg.changed:
-            save_list(self.items)  # 重命名后按新分类重写 txt，旧名 txt 已被改名函数处理
+            save_list(self.items)  # 重命名后按新分类写回 funds.json
             self._refresh_tree()
             self._log("分类标签已更新")
 
@@ -573,11 +672,6 @@ class CategoryManageDialog:
         for it in self.items:
             if it.get("category") == old:
                 it["category"] = new
-        # 改名对应的 txt 文件
-        old_file = os.path.join(BASE, f"基金代码名单_{old}.txt")
-        new_file = os.path.join(BASE, f"基金代码名单_{new}.txt")
-        if os.path.exists(old_file):
-            os.rename(old_file, new_file)
         self.cats[idx] = new
         self.lb.delete(idx)
         self.lb.insert(idx, new)
@@ -611,10 +705,6 @@ class CategoryManageDialog:
         if n > 0:
             messagebox.showinfo("提示", f"「{cat}」下还有 {n} 只基金，无法删除。\n请先把这些基金转移到其它分类，或改用「改名」。")
             return
-        # 删除空 txt（若有）
-        fpath = os.path.join(BASE, f"基金代码名单_{cat}.txt")
-        if os.path.exists(fpath):
-            os.remove(fpath)
         del self.cats[idx]
         self.lb.delete(idx)
         self.changed = True
