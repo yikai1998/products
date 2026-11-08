@@ -12,6 +12,9 @@
   - 单只基金设“今日预测涨幅(%)”，分析时仅对该基金生效（临时展示，不污染历史数据）
   - 一键批量 / 单只分析（后台线程，界面不卡）
   - 列表直接看「类型 / 最新净值 / 估值分位 / 最新信号 / 预测% / 上次更新」
+  - 列表前加勾选框可多选基金（删除 / 分析 / 转移 以勾选为准；工具栏“☑ 全选”可一键全选/取消）
+  - 支持按关键字（代码/名称）、分类筛选，并支持“只看已勾选”
+  - 每个分类可自定义行底色配色（🎨 配色），列表按分类染色便于区分
   - 按钮或双击直接打开报告文件夹
   - 默认每次分析都联网抓“最新”净值；断网时可勾“离线模式”只读本地缓存
 
@@ -55,6 +58,60 @@ def get_categories() -> list:
 def save_categories(cats: list):
     with open(CAT_PATH, "w", encoding="utf-8") as f:
         json.dump(cats, f, ensure_ascii=False, indent=2)
+
+
+# ----------------------------------------------------------------------------
+# 分类配色：每行底色按分类染色，便于区分；颜色存于 cat_colors.json（可自定义）
+# ----------------------------------------------------------------------------
+CAT_COLORS_PATH = os.path.join(BASE, "cat_colors.json")
+DEFAULT_CAT_COLORS = {"持仓": "#2e7d32", "临时": "#f9a825", "自选": "#1565c0",
+                      "观察": "#6a1b9a", "其它": "#757575"}
+PALETTE = ["#2e7d32", "#f9a825", "#1565c0", "#6a1b9a", "#757575",
+           "#c62828", "#00838f", "#ef6c00", "#4527a0", "#ad1457"]
+
+# 估值结论（信号）按等级着色（前景色），便于一眼区分高估/低估
+SIGNAL_COLORS = {
+    "严重高估": "#b71c1c",
+    "高估":     "#d32f2f",
+    "估值偏高": "#e65100",
+    "合理":     "#546e7a",
+    "估值偏低": "#2e7d32",
+    "低估":     "#1b8a3a",
+    "严重低估": "#00695c",
+}
+
+
+def get_cat_colors() -> dict:
+    colors = dict(DEFAULT_CAT_COLORS)
+    if os.path.exists(CAT_COLORS_PATH):
+        try:
+            with open(CAT_COLORS_PATH, encoding="utf-8") as f:
+                colors.update(json.load(f))
+        except Exception:
+            pass
+    # 确保每个现有分类都有颜色
+    for i, c in enumerate(get_categories()):
+        if c not in colors:
+            colors[c] = PALETTE[i % len(PALETTE)]
+    return colors
+
+
+def save_cat_colors(colors: dict):
+    with open(CAT_COLORS_PATH, "w", encoding="utf-8") as f:
+        json.dump(colors, f, ensure_ascii=False, indent=2)
+
+
+def _lighten(hex_color: str, ratio: float = 0.82) -> str:
+    """把颜色向白色混合 ratio 比例，得到淡色（用于行底色，保证黑字可读）。"""
+    h = hex_color.lstrip("#")
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return "#f2f2f2"
+    r = int(r + (255 - r) * ratio)
+    g = int(g + (255 - g) * ratio)
+    b = int(b + (255 - b) * ratio)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 # ----------------------------------------------------------------------------
@@ -115,6 +172,8 @@ class FundApp:
         self.sort_key = None          # 当前排序列（None = 按自定义/手动顺序）
         self.sort_reverse = False
         self.drag_item = None         # 拖拽中的行（自定义排序）
+        self.did_drag = False         # 本次按下后是否真发生了移动（用于区分“单击”与“拖拽”）
+        self.checked = set()          # 勾选框选中的基金代码集合
 
         self._build_ui()
         self._refresh_tree()
@@ -146,21 +205,46 @@ class FundApp:
             self.root,
             text="默认每次都联网抓最新净值；断网时勾“离线模式”只读本地缓存。多选后点“开始分析选中”批量跑；"
                  "单选一只并“设今日预测”可对该基金单独预测。双击某行打开报告；鼠标悬停某行看详情。"
-                 "点击任意列头可按该列排序（再点切换升/降序）；上下拖动行可自定义顺序，松手即保存为默认顺序。"
+                 "左上角勾选框可多选基金（删除/分析/转移以勾选为准，“☑ 全选”一键全选/取消）；"
+                 "顶部可按关键字、分类筛选（含“只看已勾选”）；点击列头排序（再点切换升/降序）；"
+                 "无筛选/无排序时上下拖动行可自定义顺序，松手即保存为默认顺序；分类行底色可在“🎨 配色”里自定义。"
+                 "估值结论按信号等级着色（红=偏贵、绿=偏便宜），与分类底色互不冲突。"
                  "报告里的「走势图.html」支持顶部日期筛选（From/To）与上下两图滑块联动，指数基金额外显示跟踪指数 PE 分位。",
             foreground="#666",
         )
         hint.pack(fill=tk.X, padx=8)
 
+        # 筛选栏
+        filter_f = ttk.Frame(self.root, padding=(8, 2, 8, 6))
+        filter_f.pack(fill=tk.X)
+        ttk.Label(filter_f, text="筛选：").pack(side=tk.LEFT)
+        self.filter_text_var = tk.StringVar()
+        self.filter_text_var.trace_add("write", lambda *a: self._refresh_tree())
+        ttk.Entry(filter_f, textvariable=self.filter_text_var, width=18).pack(side=tk.LEFT, padx=3)
+        ttk.Label(filter_f, text="分类：").pack(side=tk.LEFT, padx=(6, 2))
+        self.filter_cat_var = tk.StringVar(value="全部")
+        self.filter_cat_cb = ttk.Combobox(filter_f, textvariable=self.filter_cat_var,
+                                          values=["全部"] + get_categories(), width=10, state="readonly")
+        self.filter_cat_cb.pack(side=tk.LEFT, padx=3)
+        self.filter_cat_var.trace_add("write", lambda *a: self._refresh_tree())
+        self.filter_checked_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filter_f, text="只看已勾选", variable=self.filter_checked_var,
+                        command=self._refresh_tree).pack(side=tk.LEFT, padx=6)
+        ttk.Separator(filter_f, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=8, fill=tk.Y)
+        ttk.Button(filter_f, text="☑ 全选", command=self._toggle_all).pack(side=tk.LEFT, padx=2)
+        self.check_var = tk.StringVar(value="已勾选 0 只")
+        ttk.Label(filter_f, textvariable=self.check_var, foreground="#137333").pack(side=tk.LEFT, padx=4)
+        ttk.Button(filter_f, text="🎨 配色", command=self._edit_colors).pack(side=tk.LEFT, padx=2)
+
         # 列表
-        cols = ("code", "name", "category", "type", "latest_nav", "valuation", "signal", "predict", "updated")
+        cols = ("sel", "code", "name", "category", "type", "latest_nav", "valuation", "signal", "predict", "updated")
         self.tree = ttk.Treeview(self.root, columns=cols, show="headings", selectmode="extended")
         headers = {
-            "code": "代码", "name": "名称", "category": "分类", "type": "类型",
+            "sel": "✓", "code": "代码", "name": "名称", "category": "分类", "type": "类型",
             "latest_nav": "最新净值", "valuation": "估值分位", "signal": "估值结论",
             "predict": "预测%", "updated": "上次更新",
         }
-        widths = {"code": 78, "name": 230, "category": 60, "type": 70, "latest_nav": 80,
+        widths = {"sel": 34, "code": 78, "name": 230, "category": 60, "type": 70, "latest_nav": 80,
                   "valuation": 80, "signal": 150, "predict": 60, "updated": 100}
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda c=c: self._on_heading_click(c))
@@ -183,19 +267,55 @@ class FundApp:
 
     # ---- 列表刷新 ----
     def _refresh_tree(self):
+        # 分类底色：每个分类一个 tag
+        colors = get_cat_colors()
+        cat_tag = {}
+        for i, c in enumerate(get_categories()):
+            tag = f"cat{i}"
+            cat_tag[c] = tag
+            self.tree.tag_configure(tag, background=_lighten(colors.get(c, "#757575")))
+
+        # 估值结论：按信号等级着色（前景色），一眼区分高估/低估
+        sig_tag = {}
+        for idx, (s, col) in enumerate(SIGNAL_COLORS.items()):
+            tag = f"sig{idx}"
+            sig_tag[s] = tag
+            self.tree.tag_configure(tag, foreground=col)
+
+        # 排序
         if self.sort_key:
-            ordered = sorted(self.items, key=lambda it: self._cell_sort_key(self.sort_key, it),
-                             reverse=self.sort_reverse)
+            base = sorted(self.items, key=lambda it: self._cell_sort_key(self.sort_key, it),
+                          reverse=self.sort_reverse)
         else:
-            ordered = self.items
+            base = self.items
+
+        # 筛选
+        text = self.filter_text_var.get().strip().lower()
+        catf = self.filter_cat_var.get()
+        chk_only = self.filter_checked_var.get()
+        displayed = []
+        for it in base:
+            if catf != "全部" and it.get("category") != catf:
+                continue
+            if text:
+                if text not in it["code"].lower() and text not in str(it.get("name", "")).lower():
+                    continue
+            if chk_only and it["code"] not in self.checked:
+                continue
+            displayed.append(it)
+
         for row in self.tree.get_children():
             self.tree.delete(row)
-        for it in ordered:
+        for it in displayed:
             pred = it.get("predict_today")
             pred_txt = "" if pred is None else f"{pred:+.2f}"
+            checked = "☑" if it["code"] in self.checked else "☐"
+            tag = cat_tag.get(it.get("category", "其它"), "cat0")
+            sig = it.get("signal", "-")
+            tags = (tag, sig_tag[sig]) if sig in sig_tag else (tag,)
             self.tree.insert(
-                "", tk.END, iid=it["code"],
-                values=(it["code"], it.get("name", ""), it.get("category", "其它"), it.get("type", "-"),
+                "", tk.END, iid=it["code"], tags=tags,
+                values=(checked, it["code"], it.get("name", ""), it.get("category", "其它"), it.get("type", "-"),
                         it.get("latest_nav", "-"), it.get("valuation", "-"),
                         it.get("signal", "-"), pred_txt, it.get("updated", "-")),
             )
@@ -203,6 +323,8 @@ class FundApp:
     # ---- 排序 / 自定义顺序 ----
     def _on_heading_click(self, col):
         """点击列头排序：同列再次点击切换升/降序，换列则重置为升序。"""
+        if col == "sel":   # 勾选框列不参与排序
+            return
         if self.sort_key == col:
             self.sort_reverse = not self.sort_reverse
         else:
@@ -253,11 +375,21 @@ class FundApp:
 
     # ---- 拖拽自定义排序 ----
     def _on_press(self, event):
+        self.drag_item = None
+        self.did_drag = False
+        # 点在第一列（勾选框）-> 切换勾选，不触发拖拽
+        if self.tree.identify_column(event.x) == "#1":
+            row = self.tree.identify_row(event.y)
+            if row:
+                self._toggle_check(row)
+            return
         self.drag_item = self.tree.identify_row(event.y)
 
     def _on_drag(self, event):
         if self.drag_item is None:
             return
+        # 真正发生了移动才算“拖拽”，否则视为普通单击（不触发重排/不弹提示）
+        self.did_drag = True
         # 拖动时高亮目标行，给出视觉反馈（ttk 行背景 tag）
         row = self.tree.identify_row(event.y)
         if row and row != self.drag_item:
@@ -272,13 +404,17 @@ class FundApp:
     def _on_release(self, event):
         di = self.drag_item
         self.drag_item = None
-        if di is None:
+        # 仅当“真正拖动过”才进入拖拽逻辑；普通单击直接放行，避免误报“拖拽禁用”
+        if di is None or not self.did_drag:
+            return
+        # 筛选/排序状态下拖拽重排无意义（显示顺序 ≠ 真实顺序），禁用并提示
+        if not self._plain_mode():
+            self._log("当前处于筛选/排序状态，拖拽重排已禁用；请先清除筛选与排序再调整顺序。")
+            self._refresh_tree()
             return
         target = self.tree.identify_row(event.y)
-        # 清掉拖拽高亮
-        for r in self.tree.get_children():
-            self.tree.item(r, tags=())
         if not target or target == di:
+            self._refresh_tree()
             return
         # 进入自定义顺序：清除列排序，按当前界面顺序重排 self.items 并保存
         self.sort_key = None
@@ -292,6 +428,54 @@ class FundApp:
         self._update_sort_label()
         self._refresh_tree()
         self._log(f"已调整顺序（{di} 移到 {target} 之前），已保存为默认顺序")
+
+    # ---- 勾选框 / 筛选 相关 ----
+    def _toggle_check(self, code):
+        """切换某行的勾选状态（只改单元格，不重排）。"""
+        if code in self.checked:
+            self.checked.discard(code)
+            self.tree.set(code, "sel", "☐")
+        else:
+            self.checked.add(code)
+            self.tree.set(code, "sel", "☑")
+        self._update_check_label()
+
+    def _update_check_label(self):
+        if hasattr(self, "check_var"):
+            self.check_var.set(f"已勾选 {len(self.checked)} 只")
+
+    def _toggle_all(self):
+        """一键全选 / 取消：若当前可见行已全部勾选则取消全选，否则全选当前可见行。"""
+        visible = list(self.tree.get_children())
+        if visible and all(c in self.checked for c in visible):
+            self.checked = set()
+        else:
+            self.checked = set(visible)
+        self._refresh_tree()
+        self._update_check_label()
+
+    def _plain_mode(self):
+        """是否处于“无筛选 + 无排序”的纯自定义顺序模式（仅此模式允许拖拽重排）。"""
+        return (not self.sort_key and
+                self.filter_cat_var.get() == "全部" and
+                not self.filter_text_var.get().strip() and
+                not self.filter_checked_var.get())
+
+    def _active_selection(self):
+        """批量操作的选中目标：优先取勾选集合，否则取 Treeview 选中行；只作用于可见行。"""
+        visible = set(self.tree.get_children())
+        if self.checked:
+            return [c for c in self.checked if c in visible]
+        return [c for c in self.tree.selection() if c in visible]
+
+    def _refresh_filter_categories(self):
+        if hasattr(self, "filter_cat_cb"):
+            self.filter_cat_cb["values"] = ["全部"] + get_categories()
+
+    def _edit_colors(self):
+        dlg = CategoryColorDialog(self.root)
+        self.root.wait_window(dlg.top)
+        self._refresh_tree()
 
     def _log(self, msg):
         self.log.configure(state=tk.NORMAL)
@@ -314,14 +498,16 @@ class FundApp:
             self._log(f"已添加 {code} {dlg.result['name']}（{dlg.result.get('category','')}）")
 
     def _delete_fund(self):
-        sel = self.tree.selection()
+        sel = self._active_selection()
         if not sel:
-            messagebox.showinfo("提示", "请先选中要删除的基金")
+            messagebox.showinfo("提示", "请先勾选要删除的基金（或选中行）")
             return
         for code in sel:
             self.items = [i for i in self.items if i["code"] != code]
+        self.checked = {c for c in self.checked if c in {i["code"] for i in self.items}}
         save_list(self.items)
         self._refresh_tree()
+        self._update_check_label()
         self._log(f"已删除 {len(sel)} 只基金（已写入 funds.json）")
 
     def _refresh_names(self):
@@ -359,9 +545,9 @@ class FundApp:
     # ---- 分类管理 ----
     def _transfer_category(self):
         """把选中的基金转移到另一个分类（支持多选）。"""
-        sel = self.tree.selection()
+        sel = self._active_selection()
         if not sel:
-            messagebox.showinfo("提示", "请先选中要转移的基金（可多选）")
+            messagebox.showinfo("提示", "请先勾选要转移的基金（或选中行，可多选）")
             return
         dlg = TransferDialog(self.root, get_categories())
         self.root.wait_window(dlg.top)
@@ -383,14 +569,15 @@ class FundApp:
         self.root.wait_window(dlg.top)
         if dlg.changed:
             save_list(self.items)  # 重命名后按新分类写回 funds.json
+            self._refresh_filter_categories()
             self._refresh_tree()
             self._log("分类标签已更新")
 
     # ---- 分析流程 ----
     def _start(self):
-        sel = self.tree.selection()
+        sel = self._active_selection()
         if not sel:
-            messagebox.showinfo("提示", "请先选中要分析的基金（可多选）")
+            messagebox.showinfo("提示", "请先勾选要分析的基金（或选中行，可多选）")
             return
         self._log(f"开始分析 {len(sel)} 只基金 ……（后台运行中，界面可继续操作）")
         self.worker = threading.Thread(target=self._run_worker, args=(list(sel),), daemon=True)
@@ -743,6 +930,80 @@ class TransferDialog:
         self.top.destroy()
 
     def _cancel(self):
+        self.top.destroy()
+
+
+# ----------------------------------------------------------------------------
+# 分类配色弹窗
+# ----------------------------------------------------------------------------
+class CategoryColorDialog:
+    def __init__(self, parent):
+        self.top = tk.Toplevel(parent)
+        self.top.title("分类配色")
+        self.top.geometry("380x480")
+        self.top.resizable(False, False)
+        self.top.grab_set()
+        self.colors = get_cat_colors()
+        self.cat_frames = {}     # cat -> {palette_color: button}
+        self.custom_btns = {}    # cat -> “自定义”按钮（其 bg 反映当前色）
+
+        f = ttk.Frame(self.top, padding=12)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text="点击色块即可设为该分类的行底色；当前选中块带高亮边框。").pack(anchor=tk.W)
+
+        body = ttk.Frame(f)
+        body.pack(fill=tk.BOTH, expand=True, pady=6)
+        for c in get_categories():
+            block = ttk.LabelFrame(body, text=c, padding=6)
+            block.pack(fill=tk.X, pady=4)
+            cur = self.colors.get(c, "#757575")
+            self.cat_frames[c] = {}
+            for col in PALETTE:
+                b = tk.Button(block, width=3, height=1, bg=col, relief=tk.SOLID, bd=1,
+                              command=lambda cc=c, co=col: self._set(cc, co))
+                b.pack(side=tk.LEFT, padx=2, pady=2)
+                if col == cur:
+                    b.config(relief=tk.SUNKEN, bd=3)
+                self.cat_frames[c][col] = b
+            cb = tk.Button(block, text="自定义…", width=7, bg=cur,
+                           command=lambda cc=c: self._custom(cc))
+            cb.pack(side=tk.LEFT, padx=8)
+            self.custom_btns[c] = cb
+
+        ttk.Label(f, text="（颜色用于列表行底色，便于区分分类；过深可能影响黑字可读性）",
+                  foreground="#666").pack(anchor=tk.W, pady=(4, 0))
+
+        btns = ttk.Frame(f)
+        btns.pack(pady=10)
+        ttk.Button(btns, text="重置默认", command=self._reset).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="确定", command=self._ok).pack(side=tk.LEFT, padx=8)
+
+    def _set(self, cat, col):
+        """选中某个调色板颜色：更新数据 + 高亮当前块 + 同步“自定义”按钮底色。"""
+        self.colors[cat] = col
+        for co, b in self.cat_frames[cat].items():
+            b.config(relief=tk.SUNKEN if co == col else tk.SOLID, bd=3 if co == col else 1)
+        if cat in self.custom_btns:
+            self.custom_btns[cat].config(bg=col)
+
+    def _custom(self, cat):
+        """原生取色器：先释放本窗口的 grab，避免取色器被抢占而无法点击。"""
+        self.top.grab_release()
+        try:
+            res = tk.colorchooser.askcolor(initialcolor=self.colors.get(cat, "#757575"),
+                                           parent=self.top)
+        finally:
+            self.top.grab_set()
+        if res and res[1]:
+            self._set(cat, res[1])
+
+    def _reset(self):
+        for c in get_categories():
+            col = DEFAULT_CAT_COLORS.get(c) or PALETTE[0]
+            self._set(c, col)
+
+    def _ok(self):
+        save_cat_colors(self.colors)
         self.top.destroy()
 
 
