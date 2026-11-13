@@ -553,6 +553,15 @@ th {{ background: #f5f5f5; position: sticky; top: 0; }}
 
 def _save_png(df: pd.DataFrame, fund_code: str, name: str, folder: str, predict: Optional[dict] = None) -> None:
     df_plot = df.sort_values("净值日期")
+
+    # 把“今日预测”用红色虚线连到最后一个真实数据点，避免孤立红点挡住走势
+    def _connect(ax, last_x, last_y, pdate, pval, label):
+        if last_x is not None and pdate is not None:
+            ax.plot([last_x, pdate], [last_y, pval], color="red", linestyle="--",
+                    linewidth=1.5, zorder=4)
+        ax.scatter([pdate], [pval], color="red", zorder=5, s=36, label=label)
+        ax.legend(loc="upper left")
+
     fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(22, 8), constrained_layout=True)
     ax1, ax2, ax3, ax4 = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
@@ -560,8 +569,8 @@ def _save_png(df: pd.DataFrame, fund_code: str, name: str, folder: str, predict:
     ax1.set_xlabel("日期"); ax1.set_ylabel("累计净值"); ax1.set_title("全历史累计净值走势")
     ax1.tick_params(axis="x", rotation=40); ax1.margins(y=0.1)
     if predict:
-        ax1.scatter([predict["date"]], [predict["累计净值"]], color="red", zorder=5, s=40, label="今日预测")
-        ax1.legend(loc="upper left")
+        _connect(ax1, df_plot["净值日期"].iloc[-1], df_plot["累计净值"].iloc[-1],
+                 predict["date"], predict["累计净值"], "今日预测")
 
     ax2.plot(df_plot["净值日期"], df_plot["估值分位"], color="blue", linewidth=2)
     ax2.plot(df_plot["净值日期"], df_plot["高估线"], color="red", linestyle="--", linewidth=1.8, label="高估线")
@@ -570,21 +579,23 @@ def _save_png(df: pd.DataFrame, fund_code: str, name: str, folder: str, predict:
     ax2.tick_params(axis="x", rotation=40); ax2.margins(y=0.1); ax2.invert_yaxis()
     ax2.legend(loc="lower right", fontsize=8, framealpha=0.8)
     if predict and not pd.isna(predict["估值分位"]):
-        ax2.scatter([predict["date"]], [predict["估值分位"]], color="red", zorder=5, s=40)
+        _connect(ax2, df_plot["净值日期"].iloc[-1], df_plot["估值分位"].iloc[-1],
+                 predict["date"], predict["估值分位"], "今日预测")
 
     tail = df_plot.tail(250)
     ax3.plot(tail["净值日期"], tail["累计净值"], color="blue", linewidth=2)
     ax3.set_xlabel("日期"); ax3.set_ylabel("累计净值"); ax3.set_title("近250日累计净值走势")
     ax3.tick_params(axis="x", rotation=40); ax3.margins(y=0.1)
     if predict:
-        ax3.scatter([predict["date"]], [predict["累计净值"]], color="red", zorder=5, s=40, label="今日预测")
-        ax3.legend(loc="upper left")
+        _connect(ax3, tail["净值日期"].iloc[-1], tail["累计净值"].iloc[-1],
+                 predict["date"], predict["累计净值"], "今日预测")
 
     ax4.plot(tail["净值日期"], tail["近60日估值分位"], color="blue", linewidth=2)
     ax4.set_xlabel("日期"); ax4.set_ylabel("近60日估值分位"); ax4.set_title("近250日估值分位(60日窗口)")
     ax4.tick_params(axis="x", rotation=40); ax4.margins(y=0.1); ax4.invert_yaxis()
     if predict and not pd.isna(predict["估值分位"]):
-        ax4.scatter([predict["date"]], [predict["估值分位"]], color="red", zorder=5, s=40)
+        _connect(ax4, tail["净值日期"].iloc[-1], tail["近60日估值分位"].iloc[-1],
+                 predict["date"], predict["估值分位"], "今日预测")
 
     fig.suptitle(f"{name}（{fund_code}）走势仪表盘", fontsize=14)
     fig.savefig(os.path.join(folder, "历史趋势.png"), dpi=200)
@@ -631,6 +642,15 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
         "code": fund_code, "name": name, "type": fund_type or "-",
         "nav": latest_nav, "signal": signal, "valuation": valuation, "drawdown": drawdown,
     }
+    # 最后一个真实数据点（用于把“今日预测”连到历史走势上，避免孤立红点）
+    try:
+        _last_date = dates[-1]
+        _lc = dfp["累计净值"].iloc[-1]
+        _lv = dfp["估值分位"].iloc[-1]
+        last_real = [_last_date, None if pd.isna(_lc) else round(float(_lc), 5)]
+        last_real_val = [_last_date, None if pd.isna(_lv) else round(float(_lv), 5)]
+    except Exception:
+        last_real, last_real_val = [None, None], [None, None]
     if predict and not pd.isna(predict.get("估值分位")):
         predict_js = json.dumps({
             "date": pd.to_datetime(predict["date"]).strftime("%Y-%m-%d"),
@@ -655,6 +675,8 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
         "var DATA = __DATA__;"
         "var INFO = __INFO__;"
         "var PREDICT = __PREDICT__;"
+        "var LAST_REAL = __LASTREAL__;"
+        "var LAST_REAL_VAL = __LASTREALVAL__;"
         "var navChart = echarts.init(document.getElementById('navChart'));"
         "var valChart = echarts.init(document.getElementById('valChart'));"
         "var navOption = {"
@@ -688,9 +710,15 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
         "  ]"
         "};"
         "if (PREDICT) {"
-        "  navOption.series.push({ name: '今日预测', type: 'scatter', symbolSize: 12, itemStyle:{color:'#e74c3c'}, data: [[PREDICT.date, PREDICT.cum]] });"
-        "  valOption.series.push({ name: '今日预测', type: 'scatter', symbolSize: 12, itemStyle:{color:'#e74c3c'}, data: [[PREDICT.date, PREDICT.val]] });"
+        "  var baseNav = (LAST_REAL[0] && LAST_REAL[1]!=null) ? [[LAST_REAL[0], LAST_REAL[1]], [PREDICT.date, PREDICT.cum]] : [[PREDICT.date, PREDICT.cum]];"
+        "  navOption.series.push({ name:'今日预测', type:'line', showSymbol:true, symbol:'circle', symbolSize:9,"
+        "     lineStyle:{color:'#e74c3c', type:'dashed', width:2}, itemStyle:{color:'#e74c3c'},"
+        "     data: baseNav, label:{show:true, formatter:'预测 '+PREDICT.cum, position:'top', color:'#e74c3c', fontSize:10} });"
         "  navOption.legend.data.push('今日预测');"
+        "  var baseVal = (LAST_REAL_VAL[0] && LAST_REAL_VAL[1]!=null) ? [[LAST_REAL_VAL[0], LAST_REAL_VAL[1]], [PREDICT.date, PREDICT.val]] : [[PREDICT.date, PREDICT.val]];"
+        "  valOption.series.push({ name:'今日预测', type:'line', showSymbol:true, symbol:'circle', symbolSize:9,"
+        "     lineStyle:{color:'#e74c3c', type:'dashed', width:2}, itemStyle:{color:'#e74c3c'},"
+        "     data: baseVal, label:{show:true, formatter:'预测 '+PREDICT.val, position:'bottom', color:'#e74c3c', fontSize:10} });"
         "  valOption.legend.data.push('今日预测');"
         "}"
         "navChart.setOption(navOption);"
@@ -714,6 +742,8 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
     chart_js = chart_js.replace("__DATA__", json.dumps(data, ensure_ascii=False))
     chart_js = chart_js.replace("__INFO__", json.dumps(info, ensure_ascii=False))
     chart_js = chart_js.replace("__PREDICT__", predict_js)
+    chart_js = chart_js.replace("__LASTREAL__", json.dumps(last_real, ensure_ascii=False))
+    chart_js = chart_js.replace("__LASTREALVAL__", json.dumps(last_real_val, ensure_ascii=False))
     chart_js = chart_js.replace("__MINDATE__", first_date)
     chart_js = chart_js.replace("__MAXDATE__", last_date)
 
@@ -848,15 +878,30 @@ def run_fund(
             print(f"[{code}] 持仓抓取失败（可忽略）：{e}")
 
     nav = fetch_nav(code, offline=offline)                   # 真实历史（不含预测）
-    analyzed = analyze_signals(nav, code, name, fund_type=fund_type, predict_today=predict_today, index_val=index_val)
+
+    # 今日预测仅在“今日真实净值尚未发布”时叠加展示：
+    #   - 最新净值日期 < 今天（盘中 / 收盘前，今日 NAV 还没出）→ 展示预测，延伸走势；
+    #   - 最新净值日期 == 今天（今日 NAV 已出）→ 预测已无意义，自动不展示、不写图、并标记过期。
+    today = datetime.date.today()
+    try:
+        latest_nav_date = pd.to_datetime(nav["净值日期"]).max().date()
+    except Exception:
+        latest_nav_date = None
+    show_predict = (predict_today is not None) and (latest_nav_date is not None) and (latest_nav_date < today)
+    prediction_obsolete = bool(predict_today is not None and not show_predict)
+
+    analyzed = analyze_signals(
+        nav, code, name, fund_type=fund_type,
+        predict_today=(predict_today if show_predict else None), index_val=index_val,
+    )
 
     latest = analyzed.iloc[0]
     signal = latest["估值结论"]          # 统一估值结论（高估/低估/合理），所有类型一致
     detail = latest["信号"]              # 细节（动能/回撤/极端涨跌等），仅作参考
     valuation = None if pd.isna(latest["估值分位"]) else round(float(latest["估值分位"]), 4)
 
-    # 若设了今日预测：用临时叠加行算出一个“含预测的当日结论/分位”仅用于展示
-    if predict_today is not None:
+    # 仅当预测仍有效（今日 NAV 未出）时，用临时叠加行算“含预测的当日结论/分位”用于展示
+    if show_predict:
         temp = _assign_signals(_append_predict(nav, predict_today), fund_type)
         signal = temp.iloc[-1]["估值结论"]
         detail = temp.iloc[-1]["信号"]
@@ -874,6 +919,8 @@ def run_fund(
         "drawdown": None if pd.isna(latest["年最大回撤"]) else round(float(latest["年最大回撤"]), 4),
         "index_val": index_val,
         "dir": resolve_fund_dir(code, name),
+        "prediction_applied": show_predict,
+        "prediction_obsolete": prediction_obsolete,
     }
 
 

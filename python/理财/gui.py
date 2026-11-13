@@ -15,7 +15,8 @@
   - 列表前加勾选框可多选基金（删除 / 分析 / 转移 以勾选为准；工具栏“☑ 全选”可一键全选/取消）
   - 支持按关键字（代码/名称）、分类筛选，并支持“只看已勾选”
   - 每个分类可自定义行底色配色（🎨 配色），列表按分类染色便于区分
-  - 按钮或双击直接打开报告文件夹
+  - 按钮或双击直接打开报告（浏览器查看“走势图.html”，不再每次都新开一个文件夹窗口；需要原始文件时点“📁 文件夹”）
+  - 今日预测仅在“今日真实净值尚未发布”时叠加显示在走势图上，并连到历史走势；一旦当日真实净值发布，预测自动清除（不会永远留在那里）
   - 默认每次分析都联网抓“最新”净值；断网时可勾“离线模式”只读本地缓存
 
 运行：python gui.py   （需已安装 akshare / pandas / matplotlib / tkinter）
@@ -24,9 +25,11 @@
 import os
 import sys
 import json
+import csv
 import queue
 import subprocess
 import threading
+import webbrowser
 from datetime import datetime
 
 import tkinter as tk
@@ -164,9 +167,10 @@ class FundApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("基金走势分析")
-        self.root.geometry("1060x640")
+        self.root.geometry("1180x720")
 
         self.items = load_list()
+        self._prune_obsolete_predictions()   # 启动时清除“今日真实净值已发布”的过期预测
         self.q = queue.Queue()
         self.worker = None
         self.sort_key = None          # 当前排序列（None = 按自定义/手动顺序）
@@ -193,6 +197,7 @@ class FundApp:
         ttk.Checkbutton(top, text="离线模式(用缓存,不联网)", variable=self.offline_var).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="▶ 开始分析选中", command=self._start).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="📂 打开报告", command=self._open_selected).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="📁 文件夹", command=self._open_folder_selected).pack(side=tk.LEFT, padx=3)
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=6, fill=tk.Y)
         ttk.Button(top, text="🔁 转移分类", command=self._transfer_category).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="🏷 管理分类", command=self._manage_categories).pack(side=tk.LEFT, padx=3)
@@ -236,9 +241,11 @@ class FundApp:
         ttk.Label(filter_f, textvariable=self.check_var, foreground="#137333").pack(side=tk.LEFT, padx=4)
         ttk.Button(filter_f, text="🎨 配色", command=self._edit_colors).pack(side=tk.LEFT, padx=2)
 
-        # 列表
+        # 列表（带垂直 + 水平滚动条，避免“看不到底部/右侧内容”）
         cols = ("sel", "code", "name", "category", "type", "latest_nav", "valuation", "signal", "predict", "updated")
-        self.tree = ttk.Treeview(self.root, columns=cols, show="headings", selectmode="extended")
+        tree_frame = ttk.Frame(self.root)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="extended")
         headers = {
             "sel": "✓", "code": "代码", "name": "名称", "category": "分类", "type": "类型",
             "latest_nav": "最新净值", "valuation": "估值分位", "signal": "估值结论",
@@ -249,7 +256,15 @@ class FundApp:
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda c=c: self._on_heading_click(c))
             self.tree.column(c, width=widths[c], anchor=tk.CENTER if c not in ("name", "signal") else tk.W)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        # 滚动条：垂直（右侧，看全列表）+ 水平（底部，看全列）
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
         self.tree.bind("<Double-1>", lambda e: self._open_selected())
         self.tree.bind("<Motion>", self._on_motion)
         self.tree.bind("<Leave>", lambda e: self._hide_tip())
@@ -626,6 +641,10 @@ class FundApp:
                     "drawdown": res.get("drawdown") if res.get("drawdown") is not None else "-",
                     "updated": res.get("updated", "-"),
                 })
+                # 今日真实净值已发布 → 预测已无意义，自动清除（避免预测永远留在那里）
+                if res.get("prediction_obsolete") and it.get("predict_today") is not None:
+                    it["predict_today"] = None
+                    self._log(f"ℹ {res['code']}：今日真实净值已发布，今日预测已自动清除")
         save_list(self.items)
 
     # ---- 悬停详情 ----
@@ -664,21 +683,76 @@ class FundApp:
             self._tip.destroy()
             self._tip = None
 
+    # ---- 预测过期清理 ----
+    def _prune_obsolete_predictions(self):
+        """启动时扫描：若某基金本地缓存的最新净值日期已是今天（今日真实净值已出），
+        则清除其 predict_today，避免“预测永远留在那里”。仅读本地缓存，不联网。"""
+        today = str(datetime.now().date())
+        changed = False
+        for it in self.items:
+            if it.get("predict_today") is None:
+                continue
+            code = it["code"]
+            csv_path = os.path.join(analysis.resolve_fund_dir(code, it.get("name", "")), "历史净值.csv")
+            last_date = None
+            if os.path.exists(csv_path):
+                try:
+                    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+                        r = csv.reader(f)
+                        header = next(r, None)
+                        rows = [row for row in r]
+                    if rows:
+                        idx = 0
+                        if header and "净值日期" in header:
+                            idx = header.index("净值日期")
+                        last_date = (rows[-1][idx] or "").strip()
+                except Exception:
+                    last_date = None
+            if last_date and last_date[:10] == today:
+                it["predict_today"] = None
+                changed = True
+        if changed:
+            save_list(self.items)
+            self._log("已自动清除今日真实净值已发布的过期预测")
+
     # ---- 打开报告 ----
     def _open_selected(self):
+        """双击 / “打开报告”按钮：直接在默认浏览器里打开该基金的「走势图.html」。
+        浏览器用标签页，不会出现“每次双击都新开一个文件夹窗口”的堆积问题。"""
         sel = self.tree.selection()
         if not sel:
             messagebox.showinfo("提示", "请先选中一只基金")
             return
-        code = sel[0]
+        self._open_report(sel[0])
+
+    def _open_report(self, code):
         item = next((i for i in self.items if i["code"] == code), None)
         if not item:
             return
         folder = analysis.resolve_fund_dir(code, item.get("name", ""))
-        if not os.path.isdir(folder):
+        html = os.path.join(folder, "走势图.html")
+        if os.path.exists(html):
+            webbrowser.open("file://" + os.path.abspath(html))
+        elif os.path.isdir(folder):
+            # 还没生成过交互图，退回打开文件夹（仍可能看到 PNG）
+            self._open_folder(folder)
+        else:
             messagebox.showinfo("提示", "该基金还没有分析报告，请先分析。")
+
+    def _open_folder_selected(self):
+        """“打开文件夹”按钮：当你确实需要 CSV / PNG 等原始文件时才用，单独一个按钮避免误开。"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中一只基金")
             return
-        self._open_folder(folder)
+        item = next((i for i in self.items if i["code"] == sel[0]), None)
+        if not item:
+            return
+        folder = analysis.resolve_fund_dir(sel[0], item.get("name", ""))
+        if os.path.isdir(folder):
+            self._open_folder(folder)
+        else:
+            messagebox.showinfo("提示", "该基金还没有分析文件夹，请先分析。")
 
     @staticmethod
     def _open_folder(folder: str):
