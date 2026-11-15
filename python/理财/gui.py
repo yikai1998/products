@@ -36,6 +36,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, simpledialog
 
 import analysis
+import radar
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 LIST_PATH = os.path.join(BASE, "funds.json")
@@ -160,6 +161,33 @@ def save_list(items):
         json.dump(norm_items, f, ensure_ascii=False, indent=2)
 
 
+def _pnl_of(item, costs):
+    """按【单位净值】口径算浮动盈亏，返回 (成本价文本, 盈亏文本, 盈亏率 or None)。
+
+    成本单价来自 持仓成本.json；最新净值用 item['latest_nav']（analysis.run_fund 返回的单位净值）。
+    累计净值＝单位净值＋历史累计分红，是业绩口径，不能拿来算成本。
+    """
+    rec = costs.get(str(item.get("code", "")).zfill(6))
+    if not rec:
+        return "-", "-", None
+    try:
+        c = float(rec.get("cost"))
+        nav = float(item.get("latest_nav"))
+        if c <= 0 or nav <= 0 or c != c or nav != nav:
+            raise ValueError
+    except (TypeError, ValueError):
+        return "-", "-", None
+    pnl = nav / c - 1
+    txt = f"{pnl * 100:+.2f}%"
+    try:
+        s = float(rec.get("shares"))
+        if s > 0 and s == s:
+            txt += f" / {(nav - c) * s:+,.0f}元"
+    except (TypeError, ValueError):
+        pass
+    return f"{c:.4f}", txt, pnl
+
+
 # ----------------------------------------------------------------------------
 # 主界面
 # ----------------------------------------------------------------------------
@@ -167,7 +195,7 @@ class FundApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("基金走势分析")
-        self.root.geometry("1180x720")
+        self.root.geometry("1360x720")
 
         self.items = load_list()
         self._prune_obsolete_predictions()   # 启动时清除“今日真实净值已发布”的过期预测
@@ -192,11 +220,14 @@ class FundApp:
         ttk.Button(top, text="🗑 删除选中", command=self._delete_fund).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="🔄 刷新名称", command=self._refresh_names).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="📈 设今日预测", command=self._set_predict).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="💰 设成本", command=self._set_cost).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="⚡ 抓盘中估值", command=self._fetch_intraday).pack(side=tk.LEFT, padx=3)
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=6, fill=tk.Y)
         self.offline_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="离线模式(用缓存,不联网)", variable=self.offline_var).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="▶ 开始分析选中", command=self._start).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="📂 打开报告", command=self._open_selected).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="📡 低估雷达", command=self._open_radar).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="📁 文件夹", command=self._open_folder_selected).pack(side=tk.LEFT, padx=3)
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=6, fill=tk.Y)
         ttk.Button(top, text="🔁 转移分类", command=self._transfer_category).pack(side=tk.LEFT, padx=3)
@@ -208,13 +239,7 @@ class FundApp:
 
         hint = ttk.Label(
             self.root,
-            text="默认每次都联网抓最新净值；断网时勾“离线模式”只读本地缓存。多选后点“开始分析选中”批量跑；"
-                 "单选一只并“设今日预测”可对该基金单独预测。双击某行打开报告；鼠标悬停某行看详情。"
-                 "左上角勾选框可多选基金（删除/分析/转移以勾选为准，“☑ 全选”一键全选/取消）；"
-                 "顶部可按关键字、分类筛选（含“只看已勾选”）；点击列头排序（再点切换升/降序）；"
-                 "无筛选/无排序时上下拖动行可自定义顺序，松手即保存为默认顺序；分类行底色可在“🎨 配色”里自定义。"
-                 "估值结论按信号等级着色（红=偏贵、绿=偏便宜），与分类底色互不冲突。"
-                 "报告里的「走势图.html」支持顶部日期筛选（From/To）与上下两图滑块联动，指数基金额外显示跟踪指数 PE 分位。",
+            text="双击开报告 · 悬停看详情 · 勾选框多选 · 点列头排序 · 拖拽调顺序　｜　完整用法点右侧「❓ 帮助」",
             foreground="#666",
         )
         hint.pack(fill=tk.X, padx=8)
@@ -240,18 +265,22 @@ class FundApp:
         self.check_var = tk.StringVar(value="已勾选 0 只")
         ttk.Label(filter_f, textvariable=self.check_var, foreground="#137333").pack(side=tk.LEFT, padx=4)
         ttk.Button(filter_f, text="🎨 配色", command=self._edit_colors).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filter_f, text="❓ 帮助", command=self._show_help).pack(side=tk.LEFT, padx=2)
 
         # 列表（带垂直 + 水平滚动条，避免“看不到底部/右侧内容”）
-        cols = ("sel", "code", "name", "category", "type", "latest_nav", "valuation", "signal", "predict", "updated")
+        cols = ("sel", "code", "name", "category", "type", "latest_nav", "cost", "pnl",
+                "valuation", "signal", "predict", "updated")
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="extended")
         headers = {
             "sel": "✓", "code": "代码", "name": "名称", "category": "分类", "type": "类型",
-            "latest_nav": "最新净值", "valuation": "估值分位", "signal": "估值结论",
+            "latest_nav": "最新净值", "cost": "成本价", "pnl": "浮动盈亏",
+            "valuation": "估值分位", "signal": "估值结论",
             "predict": "预测%", "updated": "上次更新",
         }
         widths = {"sel": 34, "code": 78, "name": 230, "category": 60, "type": 70, "latest_nav": 80,
+                  "cost": 78, "pnl": 110,
                   "valuation": 80, "signal": 150, "predict": 60, "updated": 100}
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda c=c: self._on_heading_click(c))
@@ -282,6 +311,8 @@ class FundApp:
 
     # ---- 列表刷新 ----
     def _refresh_tree(self):
+        # 个人成本（独立文件，不入库；排序与显示共用同一份快照）
+        self.costs = analysis.load_costs()
         # 分类底色：每个分类一个 tag
         colors = get_cat_colors()
         cat_tag = {}
@@ -297,7 +328,7 @@ class FundApp:
             sig_tag[s] = tag
             self.tree.tag_configure(tag, foreground=col)
 
-        # 排序
+        # 排序（列头排序 / 手动顺序）
         if self.sort_key:
             base = sorted(self.items, key=lambda it: self._cell_sort_key(self.sort_key, it),
                           reverse=self.sort_reverse)
@@ -321,6 +352,7 @@ class FundApp:
 
         for row in self.tree.get_children():
             self.tree.delete(row)
+        costs = self.costs
         for it in displayed:
             pred = it.get("predict_today")
             pred_txt = "" if pred is None else f"{pred:+.2f}"
@@ -328,10 +360,11 @@ class FundApp:
             tag = cat_tag.get(it.get("category", "其它"), "cat0")
             sig = it.get("signal", "-")
             tags = (tag, sig_tag[sig]) if sig in sig_tag else (tag,)
+            cost_txt, pnl_txt, _ = _pnl_of(it, costs)
             self.tree.insert(
                 "", tk.END, iid=it["code"], tags=tags,
                 values=(checked, it["code"], it.get("name", ""), it.get("category", "其它"), it.get("type", "-"),
-                        it.get("latest_nav", "-"), it.get("valuation", "-"),
+                        it.get("latest_nav", "-"), cost_txt, pnl_txt, it.get("valuation", "-"),
                         it.get("signal", "-"), pred_txt, it.get("updated", "-")),
             )
 
@@ -360,14 +393,26 @@ class FundApp:
             self.sort_var.set("顺序：自定义（拖拽行可调整）")
             return
         headers = {"code": "代码", "name": "名称", "category": "分类", "type": "类型",
-                   "latest_nav": "最新净值", "valuation": "估值分位", "signal": "估值结论",
+                   "latest_nav": "最新净值", "cost": "成本价", "pnl": "浮动盈亏",
+                   "valuation": "估值分位", "signal": "估值结论",
                    "predict": "预测%", "updated": "上次更新"}
         arrow = "↓降序" if self.sort_reverse else "↑升序"
         self.sort_var.set(f"已按「{headers.get(self.sort_key, self.sort_key)}」{arrow}")
 
-    @staticmethod
-    def _cell_sort_key(col, it):
+    def _cell_sort_key(self, col, it):
         """返回排序用的 (rank, value) 元组：rank=0 有值排前面，rank=1 缺失排最后。"""
+        if col in ("cost", "pnl"):
+            rec = (getattr(self, "costs", {}) or {}).get(str(it.get("code", "")).zfill(6))
+            if not rec:
+                return (1, 0.0)
+            try:
+                c = float(rec.get("cost"))
+                nav = float(it.get("latest_nav"))
+                if c <= 0 or nav <= 0:
+                    raise ValueError
+                return (0, c if col == "cost" else nav / c - 1)
+            except (TypeError, ValueError):
+                return (1, 0.0)
         if col == "valuation":
             v = it.get("valuation")
             return (0, float(v)) if isinstance(v, (int, float)) else (1, 0.0)
@@ -498,6 +543,45 @@ class FundApp:
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
+    def _show_help(self):
+        """完整用法说明（从常驻界面挪到这里，避免顶部一大段小字看不完）。"""
+        help_text = (
+            "【基础】\n"
+            "· 默认每次分析都联网抓最新净值；断网时勾“离线模式”只读本地缓存。\n"
+            "· 勾选左侧方框可多选；“☑ 全选”一键全选/取消。删除/分析/转移都以勾选为准（没勾则用高亮行）。\n"
+            "· 双击某行打开该基金报告（浏览器看走势图.html）；鼠标悬停某行看详情。\n\n"
+            "【列表】\n"
+            "· 顶部按关键字(代码/名称)、分类筛选，含“只看已勾选”。\n"
+            "· 点列头排序，再点切换升/降序；“↺ 清除排序”回到自定义顺序。\n"
+            "· 无筛选、无排序时，上下拖动行可调整顺序，松手保存。\n"
+            "· 分类行底色在“🎨 配色”自定义；估值结论按信号着色：红=偏贵、绿=偏便宜（与底色互不冲突）。\n\n"
+            "【预测 / 盘中估值】\n"
+            "· “设今日预测”：对单只基金手填一个涨跌百分数，例如 -1 表示预计跌 1%。\n"
+            "  它表示“相对最新实锤净值的今日估算”，脚本据此算出 T+1 预测净值画在图上。\n"
+            "· “抓盘中估值”：自动抓全天下的盘中估算（东财数据源，和养基宝同源）填入预测；\n"
+            "  仅交易日的 9:30-15:00 有估值，周末/节假日/夜间抓不到。抓不到的自动预测会当作过期脏数据清除，\n"
+            "  不会让上交易日的旧估算留在图上。手工预测(你手填的)始终保留、不会被覆盖或清除。\n"
+            "· 预测不会永久留存：当晚真实净值公布后重新分析，预测会自动清除，图上恢复真实走势。\n\n"
+            "【持仓成本 / 浮动盈亏】\n"
+            "· 单选一只基金点“💰 设成本”，填成本单价和可选份额，存到 持仓成本.json（不入库、不随 git 提交）。\n"
+            "· 成本按【单位净值】填：申购按当日单位净值确认份额，成交价就是单位净值；\n"
+            "  累计净值＝单位净值＋历史累计分红，只是画走势的业绩口径，不能当成本。\n"
+            "· 列表新增「成本价 / 浮动盈亏」两列；报告顶部有成本与盈亏卡片，上图画一条紫色成本水平线。\n"
+            "· 盈亏未计手续费与现金分红；红利再投会增加份额，记得回来更新。\n"
+            "· 保存成本后会自动用本地缓存刷新这一只的报告，不联网、不重抓数据。\n\n"
+            "【分析 / 报告】\n"
+            "· “开始分析选中”批量后台跑，界面不卡。低频基金(债/货)信号弱属正常。\n"
+            "· 报告顶部日期筛选(From/To) + 上下两图滑块联动；指数基金额外显示跟踪指数 PE 分位。\n"
+            "· 报告里的「近期价格通道」描述过去 250 个交易日的价格分布，不是未来目标价；\n"
+            "  同时给【累计净值】(判断相对高低，不受分红除权跳空影响) 和【单位净值】\n"
+            "  (与成本价同口径，可直接对照) 两行，算法完全相同。无分红的基金两行数值一致。\n"
+            "  估值分位 / 信号回测同为统计参考，均非投资建议。\n\n"
+            "【雷达 / 配置】\n"
+            "· “📡 低估雷达”：扫描代表性基金候选池(可看到你没关注的)，按估值分位排序。\n"
+            "· 阈值和回测参数可在项目目录建 fund_config.json 调整（见 fund_config.example.json）。"
+        )
+        messagebox.showinfo("使用帮助", help_text)
+
     # ---- 增删改 ----
     def _add_fund(self):
         dlg = AddFundDialog(self.root)
@@ -557,6 +641,95 @@ class FundApp:
             self._refresh_tree()
             self._log(f"已为 {code} 设置今日预测：{dlg.value}")
 
+    def _set_cost(self):
+        """录入/清除单只基金的持仓成本，保存后自动离线刷新该基金报告。"""
+        sel = self.tree.selection()
+        if len(sel) != 1:
+            messagebox.showinfo("提示", "请「单选」一只基金再设成本")
+            return
+        code = sel[0]
+        item = next((i for i in self.items if i["code"] == code), None)
+        if item is None:
+            return
+        costs = analysis.load_costs()
+        dlg = CostDialog(self.root, code, item, costs.get(code, {}))
+        self.root.wait_window(dlg.top)
+        if not dlg.changed:
+            return
+        if dlg.cleared:
+            costs.pop(code, None)
+            analysis.save_costs(costs)
+            self._refresh_tree()
+            self._log(f"已清除 {code} 的持仓成本（报告下次分析后不再显示盈亏）")
+            return
+        rec = {"cost": dlg.cost}
+        if dlg.shares:
+            rec["shares"] = dlg.shares
+        if dlg.note.strip():
+            rec["note"] = dlg.note.strip()
+        costs[code] = rec
+        analysis.save_costs(costs)
+        self._refresh_tree()
+        self._log(f"已保存 {code} 成本单价 {dlg.cost:.4f}（单位净值口径）"
+                  + (f"，份额 {dlg.shares:,.2f}" if dlg.shares else "，未填份额只算盈亏%"))
+        self._log(f"正在用本地缓存刷新 {code} 的报告，让成本与盈亏立即生效（不联网）……")
+        self.worker = threading.Thread(target=self._run_worker, args=([code], True), daemon=True)
+        self.worker.start()
+        self.root.after(120, self._poll)
+
+    def _fetch_intraday(self):
+        """自动抓全池盘中估值（东财/养基宝同源），填入各基金“今日预测”。
+        仅 A股/境内基金交易时段有效；QDII 白天无估值会被跳过。后台线程执行，不卡界面。"""
+        codes = [it["code"] for it in self.items]
+        if not codes:
+            return
+        self._log("正在抓取盘中估值（东财数据源）……")
+
+        def work():
+            try:
+                est = analysis.fetch_intraday_estimation(codes)
+                self.q.put(("intraday", est))
+            except Exception as e:  # noqa
+                self.q.put(("intraday_err", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(120, self._poll)
+
+    def _apply_intraday(self, est):
+        """把抓到的盘中估值增长率写入 predict_today。
+
+        自动预测只认“本次抓到的当日数据”，其余一律视为过期脏数据清除：
+          - 抓到 → 覆盖该只的自动预测；
+          - 没抓到（周末 / 非交易时段 / QDII / 接口失败）→ 清除该只的自动预测脏数据；
+          - 手工预测（predict_manual=True）始终保留，既不覆盖也不清除。
+        """
+        got, skipped_manual, cleared = [], [], []
+        for it in self.items:
+            code = it["code"]
+            if it.get("predict_manual"):
+                if it.get("predict_today") is not None:
+                    skipped_manual.append(code)
+                continue
+            if code in est:
+                it["predict_today"] = est[code]
+                got.append(f"{code} {est[code]:+.2f}%")
+            elif it.get("predict_today") is not None:
+                it["predict_today"] = None       # 过期自动预测 = 脏数据，清掉
+                cleared.append(code)
+        save_list(self.items)
+        self._refresh_tree()
+        if est:
+            self._log(f"✔ 已填入 {len(got)} 只当日盘中估值：{', '.join(got[:8])}{' …' if len(got) > 8 else ''}")
+        else:
+            self._log("⚠ 未抓到有效盘中估值（周末/节假日、非交易时段 9:30-15:00 或数据源暂不可用）；"
+                      "已清除所有“自动填入”的过期预测脏数据，手工预测保留。")
+        if cleared:
+            self._log(f"🧹 已清除 {len(cleared)} 只过期自动预测（脏数据）："
+                      f"{', '.join(cleared[:8])}{' …' if len(cleared) > 8 else ''}")
+        if skipped_manual:
+            self._log(f"🛡 {len(skipped_manual)} 只手工预测已保留、未被覆盖："
+                      f"{', '.join(skipped_manual[:8])}{' …' if len(skipped_manual) > 8 else ''}")
+
     # ---- 分类管理 ----
     def _transfer_category(self):
         """把选中的基金转移到另一个分类（支持多选）。"""
@@ -599,8 +772,9 @@ class FundApp:
         self.worker.start()
         self.root.after(120, self._poll)
 
-    def _run_worker(self, codes):
-        offline = self.offline_var.get()
+    def _run_worker(self, codes, force_offline=False):
+        # 设成本后的自动刷新强制走本地缓存，避免为了显示盈亏而意外联网重抓
+        offline = True if force_offline else self.offline_var.get()
         pred_map = {it["code"]: it.get("predict_today") for it in self.items}
         for code in codes:
             try:
@@ -620,6 +794,20 @@ class FundApp:
                 elif kind == "err":
                     code, err = payload
                     self._log(f"✘ {code} 失败：{err}")
+                elif kind == "intraday":
+                    self._apply_intraday(payload)
+                elif kind == "intraday_err":
+                    self._log(f"✘ 盘中估值抓取失败：{payload}")
+                    # 抓取异常同样会留下过期的自动预测脏数据 → 一并清除
+                    self._apply_intraday({})
+                elif kind == "radar_log":
+                    self._log(payload)
+                elif kind == "radar_done":
+                    webbrowser.open("file://" + os.path.abspath(payload))
+                    self._log(f"📡 低估雷达已生成并在浏览器打开：{os.path.basename(payload)}")
+                elif kind == "radar_err":
+                    self._log(f"✘ 低估雷达生成失败：{payload}")
+                    messagebox.showerror("低估雷达", f"生成失败：{payload}")
                 elif kind == "done":
                     self._refresh_tree()
                     self._log("全部完成。")
@@ -644,6 +832,7 @@ class FundApp:
                 # 今日真实净值已发布 → 预测已无意义，自动清除（避免预测永远留在那里）
                 if res.get("prediction_obsolete") and it.get("predict_today") is not None:
                     it["predict_today"] = None
+                    it["predict_manual"] = False
                     self._log(f"ℹ {res['code']}：今日真实净值已发布，今日预测已自动清除")
         save_list(self.items)
 
@@ -661,11 +850,14 @@ class FundApp:
         iv_txt = ""
         if iv:
             iv_txt = f"指数估值：{iv.get('index','')} PE={iv.get('pe','-')} 分位={iv.get('pe_pct','-')}\n"
+        c_txt, p_txt, _ = _pnl_of(item, getattr(self, "costs", {}) or {})
+        cost_txt = f"成本价(单位净值)：{c_txt}\n浮动盈亏：{p_txt}\n" if p_txt != "-" else ""
         txt = (f"{item['code']} {item.get('name', '')}\n"
                f"类型：{item.get('type', '-')}\n"
                f"估值结论：{item.get('signal', '-')}\n"
                f"细节：{item.get('detail', '-')}\n"
                f"{iv_txt}"
+               f"{cost_txt}"
                f"近一年最大回撤：{item.get('drawdown', '-')}")
         if self._tip is None:
             self._tip = tk.Toplevel(self.root)
@@ -710,6 +902,7 @@ class FundApp:
                     last_date = None
             if last_date and last_date[:10] == today:
                 it["predict_today"] = None
+                it["predict_manual"] = False
                 changed = True
         if changed:
             save_list(self.items)
@@ -753,6 +946,21 @@ class FundApp:
             self._open_folder(folder)
         else:
             messagebox.showinfo("提示", "该基金还没有分析文件夹，请先分析。")
+
+    def _open_radar(self):
+        """低估雷达：后台联网扫描候选池(含你没关注的基金)，按估值分位排序生成对比报告。
+        联网抓几十只会花点时间，放后台线程执行，界面不卡；完成后浏览器打开。"""
+        self._log("📡 低估雷达启动：联网扫描候选池，请稍候（后台运行，可继续操作界面）……")
+
+        def work():
+            try:
+                path = radar.scan(refresh=True, progress=lambda m: self.q.put(("radar_log", m)))
+                self.q.put(("radar_done", path))
+            except Exception as e:  # noqa
+                self.q.put(("radar_err", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(120, self._poll)
 
     @staticmethod
     def _open_folder(folder: str):
@@ -850,7 +1058,11 @@ class PredictDialog:
         ttk.Label(f, text="今日预测涨幅(%)：").pack(anchor=tk.W, pady=(8, 2))
         self.var = tk.StringVar(value="" if self.value is None else str(self.value))
         ttk.Entry(f, textvariable=self.var, width=12).pack(anchor=tk.W)
-        ttk.Label(f, text="例：-1 表示今日预计跌 1%；留空 = 清除预测。").pack(anchor=tk.W, pady=(4, 0))
+        ttk.Label(f, text="填的是相对“最新实锤净值”的今日估算涨跌，脚本据此算 T+1 预测净值。",
+                  foreground="#555", wraplength=330, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
+        ttk.Label(f, text="例：-1=预计跌 1%；留空=清除。手工预测不会被“抓盘中估值”覆盖；\n"
+                          "当晚真实净值公布后重新分析，预测会自动清除。",
+                  foreground="#555", wraplength=330, justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
 
         btns = ttk.Frame(f)
         btns.pack(pady=10)
@@ -861,14 +1073,132 @@ class PredictDialog:
         raw = self.var.get().strip()
         if raw == "":
             self.item["predict_today"] = None
+            self.item["predict_manual"] = False
             self.changed = True
             self.top.destroy()
             return
         try:
             self.item["predict_today"] = float(raw)
+            self.item["predict_manual"] = True   # 标记为手工，自动抓取不覆盖
         except ValueError:
             messagebox.showerror("错误", "请输入数字，如 -1 表示跌 1%")
             return
+        self.changed = True
+        self.top.destroy()
+
+    def _cancel(self):
+        self.top.destroy()
+
+
+# ----------------------------------------------------------------------------
+# 持仓成本录入弹窗（成本单价按单位净值口径）
+# ----------------------------------------------------------------------------
+class CostDialog:
+    def __init__(self, parent, code, item, rec):
+        self.changed = False
+        self.cleared = False
+        self.cost = None
+        self.shares = None
+        self.note = ""
+        try:
+            self.nav = float(item.get("latest_nav"))
+            if self.nav != self.nav or self.nav <= 0:
+                self.nav = None
+        except (TypeError, ValueError):
+            self.nav = None
+
+        self.top = tk.Toplevel(parent)
+        self.top.title(f"持仓成本 · {code}")
+        self.top.geometry("460x480")
+        self.top.resizable(False, False)
+        self.top.grab_set()
+
+        f = ttk.Frame(self.top, padding=14)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text=f"{code}  {item.get('name','')}",
+                  font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W)
+        nav_txt = f"{self.nav:.4f}" if self.nav else "尚未分析，暂无净值"
+        ttk.Label(f, text=f"当前单位净值 {nav_txt}（成本与盈亏都用这个口径）",
+                  foreground="#555").pack(anchor=tk.W, pady=(3, 0))
+
+        ttk.Label(f, text="成本单价（单位净值口径）*：").pack(anchor=tk.W, pady=(12, 2))
+        self.v_cost = tk.StringVar(value="" if rec.get("cost") in (None, "") else str(rec.get("cost")))
+        ttk.Entry(f, textvariable=self.v_cost, width=18).pack(anchor=tk.W)
+
+        ttk.Label(f, text="持有份额（可选，填了才算盈亏金额）：").pack(anchor=tk.W, pady=(10, 2))
+        self.v_shares = tk.StringVar(value="" if rec.get("shares") in (None, "") else str(rec.get("shares")))
+        ttk.Entry(f, textvariable=self.v_shares, width=18).pack(anchor=tk.W)
+
+        ttk.Label(f, text="备注（可选）：").pack(anchor=tk.W, pady=(10, 2))
+        self.v_note = tk.StringVar(value=str(rec.get("note", "")))
+        ttk.Entry(f, textvariable=self.v_note, width=40).pack(anchor=tk.W)
+
+        self.preview = ttk.Label(f, text="", foreground="#1a73e8", wraplength=410, justify=tk.LEFT)
+        self.preview.pack(anchor=tk.W, pady=(12, 0))
+        self.v_cost.trace_add("write", lambda *a: self._preview())
+        self.v_shares.trace_add("write", lambda *a: self._preview())
+        self._preview()
+
+        ttk.Label(f, text=(
+            "口径说明：基金按当日【单位净值】确认份额，成交价就是单位净值，所以成本填单位净值。\n"
+            "累计净值＝单位净值＋历史累计分红，只是画走势用的业绩口径，不能当成本。\n"
+            "· 多次买入请填加权平均成本＝总投入 ÷ 总份额（含申购费更准）\n"
+            "· 现金分红份额不变、钱已落袋，此处浮动盈亏不含它\n"
+            "· 红利再投会增加份额，记得回来更新"),
+            foreground="#666", wraplength=420, justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 0))
+
+        btns = ttk.Frame(f)
+        btns.pack(pady=12)
+        ttk.Button(btns, text="确定", command=self._ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btns, text="清除成本", command=self._clear).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btns, text="取消", command=self._cancel).pack(side=tk.LEFT, padx=5)
+
+    def _numbers(self):
+        try:
+            c = float(self.v_cost.get().strip())
+            if c <= 0 or c != c:
+                return None, None
+        except (TypeError, ValueError):
+            return None, None
+        s = None
+        raw = self.v_shares.get().strip()
+        if raw:
+            try:
+                s = float(raw)
+                if s <= 0 or s != s:
+                    s = None
+            except (TypeError, ValueError):
+                s = None
+        return c, s
+
+    def _preview(self):
+        c, s = self._numbers()
+        if c is None or self.nav is None:
+            self.preview.config(text="填好成本单价后，这里会按当前单位净值估算浮动盈亏。")
+            return
+        pnl = self.nav / c - 1
+        txt = f"预估浮动盈亏：{pnl * 100:+.2f}%"
+        if s:
+            txt += f"（{(self.nav - c) * s:+,.0f} 元）"
+        self.preview.config(text=txt)
+
+    def _ok(self):
+        if not self.v_cost.get().strip():
+            messagebox.showerror("错误", "请填成本单价；若想删除，请点「清除成本」")
+            return
+        c, s = self._numbers()
+        if c is None:
+            messagebox.showerror("错误", "成本单价要填正数，如 3.2156")
+            return
+        if self.v_shares.get().strip() and s is None:
+            messagebox.showerror("错误", "份额要填正数，或留空")
+            return
+        self.cost, self.shares, self.note = c, s, self.v_note.get()
+        self.changed = True
+        self.top.destroy()
+
+    def _clear(self):
+        self.cleared = True
         self.changed = True
         self.top.destroy()
 

@@ -34,6 +34,7 @@ import time
 import json
 import datetime
 from typing import Optional
+from html import escape as html_escape   # 用别名，避免被模板里的局部变量 html 遮蔽
 
 import numpy as np
 import pandas as pd
@@ -54,6 +55,83 @@ HOLD_COLUMNS = ["序号", "股票代码", "股票名称", "占净值比例", "�
 # 低波动基金类型：均线/估值分位信号意义不大，改用轻量信号
 LOW_VOL_TYPES = {"债券型", "货币型", "理财型", "保本型", "短期理财", "货币"}
 
+# ----------------------------------------------------------------------------
+# 估值分位阈值（可配置）：高估线=估值分位序列的 over 分位(小→贵)，低估线=under 分位(大→便宜)。
+# 默认 0.10 / 0.90。若要调整，在项目目录建 fund_config.json：
+#   {"valuation_quantiles": {"over": 0.10, "under": 0.90}}
+# 例如长期上涨的 QDII 全历史分位常偏低，可自行改成 over=0.15 / under=0.85 再用回测验证。
+# 修改后需重启程序生效。
+# ----------------------------------------------------------------------------
+def _load_val_quantiles():
+    over, under = 0.10, 0.90
+    path = os.path.join(BASE_DIR, "fund_config.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                vq = json.load(f).get("valuation_quantiles", {})
+            over = float(vq.get("over", over))
+            under = float(vq.get("under", under))
+            if not (0 < over < under < 1):
+                raise ValueError("需满足 0 < over < under < 1")
+        except Exception:
+            pass  # 配置非法则静默用默认
+    return over, under
+
+
+VAL_OVER_Q, VAL_UNDER_Q = _load_val_quantiles()
+
+# ----------------------------------------------------------------------------
+# 个人持仓成本（独立文件 持仓成本.json，默认不入库）
+#   cost   = 成本单价，按【单位净值】口径 —— 申购按当日单位净值确认份额，成交价就是单位净值
+#   shares = 持有份额，可选；填了才能算浮动盈亏金额
+#   note   = 备注，可选
+# 注意：累计净值 = 单位净值 + 历史累计分红，是「业绩口径」，用于画走势消除分红除权造成的假跌，
+#       不是成交价，不能当成本。二者混用会把分红当成收益，凭空虚增盈亏。
+# ----------------------------------------------------------------------------
+COST_PATH = os.path.join(BASE_DIR, "持仓成本.json")
+
+
+def load_costs() -> dict:
+    """读取个人持仓成本；文件不存在 / 损坏时返回空 dict（绝不因缺成本中断分析）。"""
+    if not os.path.exists(COST_PATH):
+        return {}
+    try:
+        with open(COST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k).zfill(6): v for k, v in data.items()
+                if str(k).isdigit() and isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
+def save_costs(data: dict) -> None:
+    """写回个人持仓成本（GUI「💰 设成本」调用）。"""
+    with open(COST_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_cost(code: str) -> Optional[dict]:
+    """取某只基金的成本信息；未填或数值非法时返回 None。"""
+    it = load_costs().get(str(code).zfill(6))
+    if not it:
+        return None
+    try:
+        c = float(it.get("cost"))
+        if c <= 0 or c != c:
+            return None
+    except (TypeError, ValueError):
+        return None
+    out = {"cost": c}
+    try:
+        s = float(it.get("shares"))
+        if s > 0 and s == s:
+            out["shares"] = s
+    except (TypeError, ValueError):
+        pass
+    if it.get("note"):
+        out["note"] = str(it["note"])
+    return out
+
 # 中文字体：给出跨平台候选列表（Mac=PingFang/Heiti，Win=雅黑/SimHei，Linux=文泉驿），
 # matplotlib 会依次尝试，保证 Mac 与 Windows 上中文都能正常显示。
 plt.rcParams["font.sans-serif"] = [
@@ -64,16 +142,55 @@ plt.rcParams["axes.unicode_minus"] = False
 
 
 # ----------------------------------------------------------------------------
+# 所有基金产物统一收进「基金报告/」，根目录只留代码与配置。
+# 之前雷达抓净值时调用 resolve_fund_dir(code) 不带名称 → 建纯数字目录；
+# 分析时带名称 → 又建一个「名称_基金代码code」目录，同一只基金出现两个文件夹。
+# 现在无名称时自动从名单/候选池补名称，双口径归一，从根上杜绝重复建目录。
+FUND_ROOT = os.path.join(BASE_DIR, "基金报告")
+
+
+def _lookup_fund_name(code: str) -> str:
+    """从 funds.json / radar_pool.json 按代码查名称，供不带 name 的调用统一命名。"""
+    for fn in ("funds.json", "radar_pool.json"):
+        path = os.path.join(BASE_DIR, fn)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for it in json.load(f):
+                    if str(it.get("code", "")).zfill(6) == code and it.get("name"):
+                        return str(it["name"]).strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _safe_folder_name(s: str) -> str:
+    """去掉 Windows/macOS 文件名非法字符，避免新建目录失败。"""
+    return re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", s).strip().rstrip(".")
+
+
 def resolve_fund_dir(fund_code: str, name: Optional[str] = None) -> str:
-    """定位（或创建）基金专属目录。优先复用已存在的「*基金代码code」目录，避免更名产生孤儿文件夹。"""
+    """定位（或创建）基金专属目录，统一放在 基金报告/ 下。
+
+    查找顺序：① 基金报告/ 里「*基金代码code」命名目录 → ② 纯数字 code 目录（兼容旧缓存）
+    → ③ 都没有则在 基金报告/ 下新建。新建时名称优先取参数，其次从名单/候选池补齐。
+    """
     code = str(fund_code).zfill(6)
-    if os.path.isdir(BASE_DIR):
-        for entry in os.listdir(BASE_DIR):
-            full = os.path.join(BASE_DIR, entry)
-            if os.path.isdir(full) and entry.endswith(f"基金代码{code}"):
-                return full
-    folder_name = f"{name}_基金代码{code}" if name else code
-    return os.path.join(BASE_DIR, folder_name)
+    root = FUND_ROOT
+    os.makedirs(root, exist_ok=True)
+    if os.path.isdir(root):
+        entries = [e for e in os.listdir(root) if os.path.isdir(os.path.join(root, e))]
+        # ① 带名称的规范目录（改名后也能命中，只要代码后缀不变）
+        for entry in entries:
+            if entry.endswith(f"基金代码{code}"):
+                return os.path.join(root, entry)
+        # ② 兼容历史纯数字目录，直接复用，不再新建第二个
+        if code in entries:
+            return os.path.join(root, code)
+    nm = _safe_folder_name(str(name or _lookup_fund_name(code) or ""))
+    folder_name = f"{nm}_基金代码{code}" if nm else code
+    return os.path.join(root, folder_name)
 
 
 # ----------------------------------------------------------------------------
@@ -336,8 +453,8 @@ def _build_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["估值分位"] = pct_all
 
     win = min(750, n - 2)
-    df["高估线"] = df["估值分位"].rolling(win, min_periods=250).quantile(0.1).shift(1)
-    df["低估线"] = df["估值分位"].rolling(win, min_periods=250).quantile(0.9).shift(1)
+    df["高估线"] = df["估值分位"].rolling(win, min_periods=250).quantile(VAL_OVER_Q).shift(1)
+    df["低估线"] = df["估值分位"].rolling(win, min_periods=250).quantile(VAL_UNDER_Q).shift(1)
 
     pct60 = np.full(n, np.nan)
     for i in range(60, n):
@@ -369,6 +486,138 @@ def _predict_row(df: pd.DataFrame, predict_pct: float) -> dict:
     cum = df["累计净值"].values
     val_pct = float((cum > nav).mean()) if len(cum) else np.nan
     return {"date": pd.Timestamp(datetime.date.today()), "累计净值": nav, "估值分位": val_pct}
+
+
+def _price_reference(df: pd.DataFrame, window: int = 250) -> Optional[dict]:
+    """近端「价格通道」：用最近 window 个交易日的累计净值分布，给出相对低位/高位区。
+
+    为什么不能用全历史反推（旧实现的 bug）：
+      估值分位 = 截至当日「历史净值高于今日」的占比。对长期创新高的基金
+      （如成立十余年的债基 050011），价格中枢从 1.0 一路升到 3.6+，
+      于是「分位大（便宜）」的日子几乎全部集中在成立初期 2009 年附近。
+      旧实现拿**最新一条**高低估线去筛**全历史**样本，得到买区 1.02~1.09、
+      卖区 1.13~3.11，而今日净值 3.63 —— 区间整体停在十几年前的价格水平，
+      既够不着也卖不掉，纯属误导。且最新 rolling 线套到 2009 年数据上本身是口径错配。
+
+    现在只描述「近期价格分布」，不做全历史外推、不预测未来价格：
+      近 window 日净值的 15%~35% 分位 = 相对低位区；65%~85% 分位 = 相对高位区。
+      取分位带而非 min/max，避免单日尖峰把区间撑歪。
+
+    双口径（计算逻辑完全相同，只是换一列重算一遍）：
+      · 累计净值（主口径，用来判断相对位置）：＝ 单位净值 ＋ 历史每份累计分红的
+        「简单加回」，**没有按除权日再投算复利**，并非严格意义上的复权净值。
+        好处是分红除权不会让它向下跳空，适合看「当前价落在近期分布的哪一段」。
+      · 单位净值（副口径，用来对照成本）：实际成交价、App 里看到的数字、
+        「我的成本」都是这个口径。但期间一旦分红，曲线会向下跳空，通道会失真，
+        所以只作数字对照，不拿来判高低。
+    """
+    try:
+        asc = df.sort_values("净值日期").reset_index(drop=True)
+        cum = pd.to_numeric(asc["累计净值"], errors="coerce").dropna()
+        if len(cum) < 60:
+            return None
+        tail = cum.tail(window)
+        n = len(tail)
+        if n < 60:
+            return None
+
+        def _channel(s: pd.Series) -> dict:
+            cur = float(s.iloc[-1])
+            bl, bh = float(s.quantile(0.15)), float(s.quantile(0.35))
+            sl, sh = float(s.quantile(0.65)), float(s.quantile(0.85))
+            if cur < bl:
+                pos = "below_buy"
+            elif cur <= bh:
+                pos = "in_buy"
+            elif cur < sl:
+                pos = "mid"
+            elif cur <= sh:
+                pos = "in_sell"
+            else:
+                pos = "above_sell"
+            return {"cur": cur, "buy_low": bl, "buy_high": bh,
+                    "sell_low": sl, "sell_high": sh, "position": pos}
+
+        main = _channel(tail)
+        dates = asc.loc[tail.index, "净值日期"]
+
+        # 同一批交易日上的单位净值；缺列或样本不足时只给累计口径
+        unit = pd.to_numeric(asc.loc[tail.index, "单位净值"], errors="coerce").dropna()
+        unit_ch = _channel(unit) if len(unit) >= 60 else None
+        # gap = 累计分红沉淀；gap_span > 0 说明窗口内发生过分红/份额折算
+        gap_series = (
+            pd.to_numeric(asc.loc[tail.index, "累计净值"], errors="coerce")
+            - pd.to_numeric(asc.loc[tail.index, "单位净值"], errors="coerce")
+        ).dropna()
+        gap = float(gap_series.iloc[-1]) if len(gap_series) else 0.0
+        gap_span = float(gap_series.max() - gap_series.min()) if len(gap_series) else 0.0
+
+        return {
+            **main, "window": n,
+            "start": pd.to_datetime(dates.iloc[0]).strftime("%Y-%m-%d"),
+            "end": pd.to_datetime(dates.iloc[-1]).strftime("%Y-%m-%d"),
+            "lo": float(tail.min()), "hi": float(tail.max()),
+            "unit": unit_ch, "gap": gap, "gap_span": gap_span,
+        }
+    except Exception:
+        return None
+
+
+def backtest_valuation(df: pd.DataFrame, horizons=(20, 60, 120)) -> Optional[dict]:
+    """轻量回测：验证“低估区买入并持有 N 日”是否比“任意日买入”更划算。
+
+    方法（用累计净值＝单位净值＋历史每份累计分红，简单加回、未复利，不受除权跳空干扰）：
+      - 买入信号：某日估值分位跨过/位于低估线之上（val >= under）且前一日不在低估区 → 记为一次买点；
+        若低估区持续多日，只在“首次进入”记一次，避免重复计数。
+      - 对每个买点，计算持有 h 个交易日后的累计净值收益率。
+      - 基准：全样本中所有交易日买入并持有 h 日的平均收益（买入并持有/择时对比）。
+      - 输出：买点数、各持有期的平均/中位收益、胜率(收益>0占比)、基准平均收益、超额。
+    说明：样本内统计、未计交易成本，仅验证信号方向是否成立，绝非未来收益承诺。
+    """
+    try:
+        asc = df.sort_values("净值日期").reset_index(drop=True)
+        cum = pd.to_numeric(asc["累计净值"], errors="coerce").values
+        val = pd.to_numeric(asc["估值分位"], errors="coerce").values
+        under = pd.to_numeric(asc["低估线"], errors="coerce").values
+        n = len(cum)
+        if n < 60:
+            return None
+        # 买点：进入低估区（今日 val>=under 且 昨日 val<under）；under 为 NaN 的日子跳过
+        # i=0 也算：若首日即在低估区，视为一个买点（无“昨日”则默认昨日不在低估区）。
+        buys = []
+        for i in range(n):
+            if pd.isna(under[i]) or pd.isna(val[i]) or pd.isna(cum[i]):
+                continue
+            prev_in = (i > 0 and (not pd.isna(under[i - 1])) and
+                       (not pd.isna(val[i - 1])) and (val[i - 1] >= under[i - 1]))
+            if val[i] >= under[i] and not prev_in:
+                buys.append(i)
+        if not buys:
+            return None
+
+        def fwd_ret(i, h):
+            if i + h >= n or pd.isna(cum[i]) or pd.isna(cum[i + h]) or cum[i] <= 0:
+                return None
+            return float(cum[i + h] / cum[i] - 1.0)
+
+        out = {"buy_count": len(buys), "horizons": {}}
+        for h in horizons:
+            sig_rets = [r for i in buys if (r := fwd_ret(i, h)) is not None]
+            base_rets = [r for i in range(n - h) if (r := fwd_ret(i, h)) is not None]
+            if not sig_rets or not base_rets:
+                continue
+            s = pd.Series(sig_rets)
+            out["horizons"][str(h)] = {
+                "count": len(sig_rets),
+                "avg": round(float(s.mean()), 4),
+                "median": round(float(s.median()), 4),
+                "win_rate": round(float((s > 0).mean()), 4),
+                "base_avg": round(float(pd.Series(base_rets).mean()), 4),
+                "excess": round(float(s.mean() - pd.Series(base_rets).mean()), 4),
+            }
+        return out if out["horizons"] else None
+    except Exception:
+        return None
 
 
 def _append_predict(df: pd.DataFrame, predict_pct: float) -> pd.DataFrame:
@@ -602,7 +851,7 @@ def _save_png(df: pd.DataFrame, fund_code: str, name: str, folder: str, predict:
     plt.close(fig)
 
 
-def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, drawdown, predict, folder, index_val=None):
+def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, drawdown, predict, folder, index_val=None, price_ref=None, backtest=None, cost=None):
     """生成可交互的 HTML 走势图（ECharts）：
        - 上图 = 净值相关（累计净值 + 单位净值 + MA20 + MA120）；
        - 下图 = 估值分位（全历史分位 + 近60日短期分位 + 高/低估线）；
@@ -627,6 +876,42 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
         if v is not None and not (isinstance(v, float) and pd.isna(v)):
             latest_nav = round(float(v), 4)
             break
+
+    def _last_num(col):
+        """取某指标最后一个有效值（dfp 已按日期升序）。"""
+        if col not in dfp.columns:
+            return None
+        s = pd.to_numeric(dfp[col], errors="coerce").dropna()
+        return float(s.iloc[-1]) if len(s) else None
+
+    long_val = _last_num("估值分位")          # 全历史口径
+    short_val = _last_num("近60日估值分位")   # 近端口径
+    unit_now = _last_num("单位净值")          # 成本/盈亏必须用单位净值（成交价口径）
+
+    # ---- 个人持仓成本：卡片 + 口径说明 + 图上成本水平线 ----
+    cost_card = ""
+    cost_note = ""
+    cost_js = {"cost": None, "line": []}
+    if cost and cost.get("cost") and unit_now is not None:
+        c = float(cost["cost"])
+        pnl = unit_now / c - 1
+        shares = cost.get("shares")
+        amt = (unit_now - c) * shares if shares else None
+        # 中国习惯：盈利红、亏损绿
+        col = "#c0392b" if pnl >= 0 else "#1e8449"
+        amt_txt = f" ／ {amt:+,.0f} 元" if amt is not None else ""
+        note_txt = f" ｜ {html_escape(str(cost['note']))}" if cost.get("note") else ""
+        cost_card = (
+            f"<div class='card'><div class='k'>我的成本（单位净值）</div><div class='v'>{c:.4f}</div></div>"
+            f"<div class='card'><div class='k'>浮动盈亏</div>"
+            f"<div class='v'><span style='color:{col};font-weight:700'>{pnl*100:+.2f}%{amt_txt}</span></div></div>"
+        )
+        cost_note = (
+            f"<br><b>关于成本：</b>盈亏按<b>单位净值</b>计算（申购按单位净值确认份额，成交价就是单位净值）；"
+            f"累计净值＝单位净值＋历史累计分红，是业绩口径，<b>不能当成本</b>。"
+            f"此处未计手续费与现金分红，红利再投后请更新份额。{note_txt}"
+        )
+        cost_js = {"cost": c, "line": [[first_date, c], [last_date, c]]}
 
     data = {
         "cum": pairs("累计净值"),
@@ -665,15 +950,123 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
               else "under" if signal in ("低估", "严重低估")
               else "fair")
 
-    # 指数估值补充信息（仅指数/ETF 基金有）
-    index_line = ""
+    # 指数估值补充信息（仅指数/ETF 基金有）——做成一张卡片
+    index_card = ""
     if index_val:
-        index_line = (f"｜ 指数估值({index_val['index']}) PE：<b>{index_val['pe']}</b> "
-                      f"｜ PE分位：<b>{index_val['pe_pct']}</b>（越大越便宜）")
+        index_card = (f"<div class='card'><div class='k'>指数估值 · {index_val['index']}</div>"
+                      f"<div class='v'>PE {index_val['pe']} ｜ PE分位 {index_val['pe_pct']}</div></div>")
+
+    # 近期价格通道：近 250 交易日的相对低位/高位区（双口径并列，不是未来目标价）
+    if price_ref:
+        def _fmt(x):
+            return "-" if x is None else f"{x:.4f}"
+        pos_tip = {
+            "below_buy": ("#1e8449", "当前价低于近端低位区：正处在回撤 / 下行段，通道只描述过去，不代表已经见底。"),
+            "in_buy": ("#1e8449", "当前价落在近端低位区（相对便宜的一段）。"),
+            "mid": ("#2471a3", "当前价处于近端通道中部。"),
+            "in_sell": ("#c0392b", "当前价落在近端高位区（相对贵的一段）。"),
+            "above_sell": ("#c0392b", "当前价高于近端高位区：处于创新高段，历史通道已不适用，别按上界机械卖出。"),
+        }
+        pos_color, pos_text = pos_tip.get(price_ref["position"], ("#555", ""))
+
+        def _row(label, ch, hint=""):
+            return (
+                f"<div class='row'><span class='lbl'>{label}</span>"
+                f"<span class='buy'>相对低位区 {_fmt(ch['buy_low'])}~{_fmt(ch['buy_high'])}</span>"
+                f" ｜ <span class='sell'>相对高位区 {_fmt(ch['sell_low'])}~{_fmt(ch['sell_high'])}</span>"
+                f" ｜ 当前 <b>{_fmt(ch['cur'])}</b>{hint}</div>"
+            )
+
+        rows_html = _row("累计净值 · 判断相对位置", price_ref)
+        gap = price_ref.get("gap", 0.0)
+        gap_span = price_ref.get("gap_span", 0.0)
+        unit = price_ref.get("unit")
+        notes = []
+        if unit is None:
+            notes.append("缓存缺少单位净值数据，本次只给累计口径。")
+        elif abs(gap) < 1e-6:
+            notes.append("该基金无分红，单位净值与累计净值数值一致，可直接对照成本价。")
+        else:
+            rows_html += _row(
+                "单位净值 · 对照成本价", unit,
+                " <span style='color:#8e44ad;font-size:12px'>← 可直接与「我的成本」对比</span>",
+            )
+            notes.append(
+                f"两种口径相差 <b>{gap:+.4f}</b>（累计净值 − 单位净值；正常情况即历史每份累计分红）。"
+                "累计净值只是把分红简单加回、<b>未按除权日再投复利</b>，不是严格复权净值；"
+                "但它不会因分红除权跳空，所以判断相对高低以累计口径为准，"
+                "单位净值那行只用来和你在 App 里看到的价格 / 成本价对照。"
+            )
+            if gap_span > 1e-6:
+                notes.append(
+                    "⚠ 近端窗口内发生过分红或份额折算，单位净值曲线存在向下跳空，"
+                    "该行仅供看数字，不宜据此判断高低位。"
+                )
+            if gap < -1e-6:
+                notes.append(
+                    "⚠ 数据源里该基金累计净值低于单位净值（多见于做过份额折算的老基金），"
+                    "绝对数值可能失真，通道只看相对位置。"
+                )
+
+        # 长短周期口径分歧：全历史分位 vs 近60日分位方向相反时，明确提示以短周期为主
+        if long_val is not None and short_val is not None and (
+            (long_val <= 0.20 and short_val >= 0.80) or (long_val >= 0.80 and short_val <= 0.20)
+        ):
+            notes.append(
+                f"⚠ 长短周期口径分歧：全历史估值分位 {long_val:.2f}、近60日估值分位 {short_val:.2f}。"
+                "该基金长期创新高，全历史分位会天然趋近 0（显得偏贵）；"
+                "这类品种请以近60日分位 + 趋势为主，全历史分位只作背景。"
+            )
+        notes.append(
+            "这是「过去一段时间价格落在哪个区间」的统计，<b>不是未来目标价、不是买卖指令</b>；"
+            "区间随行情滚动变化。全历史样本不能用来反推买区——长期上涨基金十几年前 1 元附近的价位，"
+            "对今天毫无参考意义。"
+        )
+        notes_html = "".join(f"<div class='tip'>{t}</div>" for t in notes)
+        price_ref_html = (
+            f"<div class='pricebar'>"
+            f"<div class='ttl'>📌 <b>近期价格通道</b>"
+            f"（近 {price_ref['window']} 个交易日 {price_ref['start']} ~ {price_ref['end']}，"
+            f"两种净值口径、算法完全相同）</div>"
+            f"{rows_html}"
+            f"<div class='tip' style='color:{pos_color}'>{pos_text}</div>"
+            f"{notes_html}</div>"
+        )
+    else:
+        price_ref_html = ""
+
+    # 回测小结：低估买入持有 N 日 vs 任意日买入（样本内统计，非未来收益承诺）
+    backtest_html = ""
+    if backtest and backtest.get("horizons"):
+        def pct(x):
+            return f"{x*100:+.1f}%"
+        rows = []
+        for h, m in backtest["horizons"].items():
+            cls = "up" if m["excess"] > 0 else "down"
+            rows.append(
+                f"<tr><td>持有 {h} 个交易日</td>"
+                f"<td>{pct(m['avg'])}</td>"
+                f"<td>{pct(m['win_rate'])}</td>"
+                f"<td>{pct(m['base_avg'])}</td>"
+                f"<td class='{cls}'>{pct(m['excess'])}</td></tr>"
+            )
+        backtest_html = (
+            f"<div class='pricebar' style='background:#f4f9ff;border-color:#c9dff5'>"
+            f"📊 <b>信号回测</b>（历史低估买入，共 {backtest['buy_count']} 个买点；样本内统计、未计成本，非收益承诺）："
+            f"<table class='bt'><tr><th>持有期</th><th>低估买入平均</th><th>胜率</th><th>任意日买入</th><th>超额</th></tr>"
+            f"{''.join(rows)}</table>"
+            f"<div style='color:#5a6672;font-size:12px;line-height:1.7;margin-top:6px'>"
+            f"<b>这张表怎么看：</b>比较“低估买入平均”和“任意日买入”两列——前者更高，说明<b>按低估信号买、历史上确实更划算</b>；"
+            f"“超额”就是两者之差（<span style='color:#c0392b'>红=正、有效</span>，<span style='color:#1e8449'>绿=负、不如随便买</span>），"
+            f"“胜率”是赚钱次数占比。比如“持有60日 超额+5.2%”＝历史上在低估区买入并拿60天，平均比任意日买多赚约5.2%。"
+            f"<br><b>你要做什么：</b>什么都不用做，这块由程序自动算。它只是帮你验证“低估值不值得买”的历史依据，"
+            f"是统计参考、不是未来收益承诺。想调整判断标准可在项目目录建 fund_config.json（见示例文件）。</div></div>"
+        )
 
     chart_js = (
         "var DATA = __DATA__;"
         "var INFO = __INFO__;"
+        "var COST = __COST__;"
         "var PREDICT = __PREDICT__;"
         "var LAST_REAL = __LASTREAL__;"
         "var LAST_REAL_VAL = __LASTREALVAL__;"
@@ -721,6 +1114,13 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
         "     data: baseVal, label:{show:true, formatter:'预测 '+PREDICT.val, position:'bottom', color:'#e74c3c', fontSize:10} });"
         "  valOption.legend.data.push('今日预测');"
         "}"
+        "if (COST && COST.cost) {"
+        "  navOption.series.push({ name:'我的成本(单位净值)', type:'line', showSymbol:false,"
+        "     data: COST.line, lineStyle:{color:'#8e44ad', type:'dashed', width:2},"
+        "     label:{show:true, formatter:'成本 '+COST.cost, position:'insideEndTop',"
+        "             color:'#8e44ad', fontSize:10} });"
+        "  navOption.legend.data.push('我的成本(单位净值)');"
+        "}"
         "navChart.setOption(navOption);"
         "valChart.setOption(valOption);"
         "try { echarts.connect([navChart, valChart]); } catch(e){}"
@@ -742,6 +1142,7 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
     chart_js = chart_js.replace("__DATA__", json.dumps(data, ensure_ascii=False))
     chart_js = chart_js.replace("__INFO__", json.dumps(info, ensure_ascii=False))
     chart_js = chart_js.replace("__PREDICT__", predict_js)
+    chart_js = chart_js.replace("__COST__", json.dumps(cost_js, ensure_ascii=False))
     chart_js = chart_js.replace("__LASTREAL__", json.dumps(last_real, ensure_ascii=False))
     chart_js = chart_js.replace("__LASTREALVAL__", json.dumps(last_real_val, ensure_ascii=False))
     chart_js = chart_js.replace("__MINDATE__", first_date)
@@ -754,34 +1155,53 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{name}（{fund_code}）走势图</title>
 <style>
- body {{ font-family: "Microsoft YaHei", Arial, sans-serif; margin: 0; background: #fafafa; color: #222; }}
- header {{ padding: 16px 20px; background: #fff; border-bottom: 1px solid #eee; }}
- header h1 {{ margin: 0 0 6px; font-size: 20px; }}
- .meta {{ font-size: 13px; color: #555; line-height: 1.7; }}
- .meta b {{ color: #111; }}
- .tag {{ display:inline-block; padding:2px 10px; border-radius: 10px; margin-right:6px; font-size:12px; }}
+ * {{ box-sizing: border-box; }}
+ body {{ font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; margin: 0; background:#f5f6f8; color:#1f2329; }}
+ header {{ padding:16px 20px 14px; background:#fff; border-bottom:1px solid #e6e6e6; }}
+ header h1 {{ margin:0 0 12px; font-size:22px; }}
+ .cards {{ display:flex; flex-wrap:wrap; gap:10px; }}
+ .card {{ flex:1 1 150px; min-width:140px; background:#f8f9fb; border:1px solid #e6e8eb; border-radius:10px; padding:10px 12px; }}
+ .card .k {{ font-size:12px; color:#8a9099; margin-bottom:5px; }}
+ .card .v {{ font-size:18px; font-weight:600; color:#1f2329; word-break:break-all; }}
+ .tag {{ display:inline-block; padding:3px 12px; border-radius:12px; font-size:16px; font-weight:600; }}
  .over {{ background:#fdecea; color:#c0392b; }}
  .under {{ background:#eafaf1; color:#1e8449; }}
  .fair {{ background:#eef4fb; color:#2471a3; }}
- .filter {{ padding: 10px 20px; background:#fff; border-bottom:1px solid #eee; font-size:13px; }}
- .filter input {{ margin:0 4px; padding:2px 4px; }}
- .filter button {{ margin-left:6px; padding:2px 10px; cursor:pointer; }}
- .filter .hint {{ color:#888; margin-left:8px; }}
- #navChart, #valChart {{ width: 100%; height: 380px; background:#fff; }}
- .chart-box {{ padding: 8px 12px 8px; }}
- .note {{ padding: 4px 20px 20px; font-size: 12px; color:#888; }}
+ .pricebar {{ margin-top:12px; padding:12px 16px; border-radius:10px; background:#fffdf4; border:1px solid #f0e2b0; font-size:14px; line-height:1.9; }}
+ .pricebar .ttl {{ margin-bottom:2px; }}
+ .pricebar .row {{ white-space:normal; }}
+ .pricebar .lbl {{ display:inline-block; min-width:168px; color:#6b7280; font-size:12px; font-weight:700; }}
+ .pricebar .buy {{ color:#1e8449; font-weight:700; font-size:16px; }}
+ .pricebar .sell {{ color:#c0392b; font-weight:700; font-size:16px; }}
+ .pricebar .tip {{ color:#8a6d1b; font-size:12.5px; line-height:1.65; margin-top:2px; }}
+ table.bt {{ border-collapse:collapse; margin:10px 0 6px; font-size:14px; width:100%; max-width:560px; }}
+ table.bt th, table.bt td {{ border:1px solid #d7e3f0; padding:6px 10px; text-align:center; }}
+ table.bt th {{ background:#e8f1fb; color:#2471a3; }}
+ table.bt td.up {{ color:#c0392b; font-weight:700; }}
+ table.bt td.down {{ color:#1e8449; font-weight:700; }}
+ .filter {{ padding:10px 20px; background:#fff; border-bottom:1px solid #eee; font-size:14px; overflow-x:auto; white-space:nowrap; }}
+ .filter input {{ margin:0 4px; padding:4px 6px; font-size:14px; }}
+ .filter button {{ margin-left:6px; padding:4px 12px; font-size:14px; cursor:pointer; }}
+ .filter .hint {{ color:#98a0aa; margin-left:8px; font-size:13px; }}
+ #navChart, #valChart {{ width:100%; height:420px; background:#fff; }}
+ .chart-box {{ padding:10px 14px; }}
+ .note {{ padding:2px 20px 24px; font-size:13px; color:#7a828c; line-height:1.8; }}
 </style>
 </head>
 <body>
 <header>
   <h1>{name}（{fund_code}）</h1>
-  <div class="meta">
-    类型：<b>{fund_type or '-'}</b> ｜ 最新累计净值：<b>{latest_nav if latest_nav is not None else '-'}</b>
-    ｜ 估值结论：<span class="tag {coarse}">{signal}</span>
-    ｜ 净值估值分位：<b>{valuation if valuation is not None else '-'}</b>
-    ｜ 近一年最大回撤：<b>{drawdown if drawdown is not None else '-'}</b>
-    <br>{index_line}
+  <div class="cards">
+    <div class="card"><div class="k">类型</div><div class="v">{fund_type or '-'}</div></div>
+    <div class="card"><div class="k">最新累计净值</div><div class="v">{latest_nav if latest_nav is not None else '-'}</div></div>
+    <div class="card"><div class="k">估值结论</div><div class="v"><span class="tag {coarse}">{signal}</span></div></div>
+    <div class="card"><div class="k">净值估值分位</div><div class="v">{valuation if valuation is not None else '-'}</div></div>
+    <div class="card"><div class="k">近一年最大回撤</div><div class="v">{drawdown if drawdown is not None else '-'}</div></div>
+    {index_card}
+    {cost_card}
   </div>
+  {price_ref_html}
+  {backtest_html}
 </header>
 <div class="filter">
   <b>日期筛选：</b>从
@@ -790,14 +1210,12 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
   <input type="date" id="toDate" min="{first_date}" max="{last_date}">
   <button onclick="applyRange()">应用</button>
   <button onclick="resetRange()">全部</button>
-  <span class="hint">默认展示全部历史；上下两图日期滑块联动同步，也可拖动下方滑块 / 滚轮缩放</span>
+  <span class="hint">默认全部历史；两图滑块联动，可拖动下方滑块 / 滚轮缩放</span>
 </div>
 <div class="chart-box"><div id="navChart"></div></div>
 <div class="chart-box"><div id="valChart"></div></div>
 <div class="note">
-  上图＝净值相关（累计净值 / 单位净值 / MA20 / MA120）；下图＝估值分位（全历史分位 + 近60日短期分位 + 高/低估线）。
-  估值分位 = 历史上净值「高于」今日的交易日占比：值越大越便宜、越小越贵。长期上涨的基金全历史分位常偏低（总显贵），此时看“近60日(短期)”更准。
-  图表库 ECharts 经 CDN 加载，首次查看需联网；断网时可用同目录「历史趋势.png」。
+  上图＝净值（累计/单位/MA20/MA120）；下图＝估值分位，<b>数值越大越便宜、越小越贵</b>（长期上涨基金全历史分位偏低属正常，可看"近60日短期"）。图表库经 CDN 加载，断网请看同目录「历史趋势.png」。{cost_note}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <script>{chart_js}</script>
@@ -808,7 +1226,7 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
         f.write(html)
 
 
-def analyze_signals(df: pd.DataFrame, fund_code: str, name: str, fund_type: str = "", predict_today: Optional[float] = None, index_val: Optional[dict] = None) -> pd.DataFrame:
+def analyze_signals(df: pd.DataFrame, fund_code: str, name: str, fund_type: str = "", predict_today: Optional[float] = None, index_val: Optional[dict] = None, cost: Optional[dict] = None) -> pd.DataFrame:
     """
     打信号、统计连续天数，并落盘 CSV / HTML / PNG。
     - 落盘的 CSV/HTML/图均基于“真实历史”（不含预测行），保证历史数据干净、不会重复累加预测。
@@ -830,7 +1248,10 @@ def analyze_signals(df: pd.DataFrame, fund_code: str, name: str, fund_type: str 
     signal = latest["估值结论"]
     valuation = None if pd.isna(latest["估值分位"]) else round(float(latest["估值分位"]), 4)
     drawdown = None if pd.isna(latest["年最大回撤"]) else round(float(latest["年最大回撤"]), 4)
-    _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, drawdown, predict_point, d, index_val=index_val)
+    price_ref = _price_reference(df)
+    backtest = backtest_valuation(df)
+    _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, drawdown, predict_point, d,
+                           index_val=index_val, price_ref=price_ref, backtest=backtest, cost=cost)
     return df
 
 
@@ -893,6 +1314,7 @@ def run_fund(
     analyzed = analyze_signals(
         nav, code, name, fund_type=fund_type,
         predict_today=(predict_today if show_predict else None), index_val=index_val,
+        cost=get_cost(code),
     )
 
     latest = analyzed.iloc[0]
@@ -922,6 +1344,93 @@ def run_fund(
         "prediction_applied": show_predict,
         "prediction_obsolete": prediction_obsolete,
     }
+
+
+# ----------------------------------------------------------------------------
+# 盘中估值（自动抓“估算增长率%”替代手填预测）—— 数据源与养基宝/天天基金同源（东财）。
+# 注意：仅 A 股/境内基金在交易时段(约 9:30-15:00)有有效估值；QDII(纳指/标普/港股)白天无
+# 对应市场行情，估值无效或缺失，会自动跳过并说明原因。估值≠真实净值，仅供参考。
+# ----------------------------------------------------------------------------
+def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
+    """批量抓取盘中估值增长率(%)。
+
+    返回 {6位基金代码: 估算增长率(float, 如 3.71 表示涨3.71%)}；
+    抓不到 / 非交易时段 / QDII 无估值的基金不会出现在结果里。
+
+    兼容 akshare 各版本列名：
+      - 新接口 fund_value_estimation_em()：列为「基金代码/基金名称/<日期>-估算数据-估算增长率」
+      - 旧接口 fund_em_value_estimation()：列为「基金代码/估算增长率/基金名称」
+    列名含“估算增长率”的那一列即增长率（单位 %），按“包含匹配”定位，避免日期前缀漂移。
+    """
+    codes = [str(c).zfill(6) for c in codes]
+    result = {}
+    last_err = None
+    today = datetime.date.today()
+    # 周末无交易：直接返回空，避免把上周五的残留估算当成“今日预测”填进去。
+    if today.weekday() >= 5:
+        print("[盘中估值] 今天是周末，A股不开盘，无盘中估值，已跳过。")
+        return result
+    for fn_name in ("fund_value_estimation_em", "fund_em_value_estimation"):
+        fn = getattr(ak, fn_name, None)
+        if fn is None:
+            continue
+        try:
+            df = fn()
+            if df is None or getattr(df, "empty", True):
+                last_err = f"{fn_name} 返回空数据（可能非交易时段）"
+                continue
+            # 定位代码列
+            code_col = None
+            for cand in ("基金代码", "代码"):
+                if cand in df.columns:
+                    code_col = cand
+                    break
+            if code_col is None:
+                last_err = f"{fn_name} 无基金代码列"
+                continue
+            # 定位增长率列（按包含匹配）
+            rate_col = None
+            for c in df.columns:
+                if "估算增长率" in str(c):
+                    rate_col = c
+                    break
+            if rate_col is None:
+                for c in df.columns:
+                    if "估算涨跌" in str(c) or "涨跌幅" in str(c):
+                        rate_col = c
+                        break
+            if rate_col is None:
+                last_err = f"{fn_name} 无估算增长率列"
+                continue
+            # 关键：校验估算数据的“日期”必须是今天。东财列名形如
+            #   “2026-05-12-估算数据-估算增长率”，非交易时段/周末接口常仍返回上一交易日
+            #   的残留数据（列名日期是上一交易日）。若日期≠今天，整批丢弃，不再填入预测。
+            m = re.search(r"(\d{4})-(\d{2})-(\d{2})", str(rate_col))
+            if m:
+                data_day = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                if data_day != today:
+                    last_err = (f"{fn_name} 估算数据日期为 {data_day}（非今日），"
+                                f"是非交易时段的上一交易日残留，已丢弃")
+                    continue
+            work = df[[code_col, rate_col]].copy()
+            work[code_col] = work[code_col].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+            work = work[work[code_col].isin(codes)]
+            for _, row in work.iterrows():
+                v = row[rate_col]
+                try:
+                    fv = float(str(v).replace("%", "").strip())
+                except (TypeError, ValueError):
+                    continue
+                if fv == fv:  # 过滤 NaN
+                    result[row[code_col]] = round(fv, 4)
+            return result  # 成功（哪怕部分基金无估值）
+        except Exception as e:  # noqa
+            last_err = f"{fn_name}: {type(e).__name__}: {e}"
+            continue
+    # 两个接口都失败：返回空，由调用方提示原因（不抛异常，避免打断批量流程）
+    if last_err:
+        print(f"[盘中估值] 抓取失败：{last_err}")
+    return result
 
 
 if __name__ == "__main__":
