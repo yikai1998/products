@@ -1,0 +1,35 @@
+# ---- Python 通用 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.Python
+build/
+dist/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 个人持仓成本（金额/份额属敏感财务数据，不入库）----
+# 持仓成本.json
+
+# ---- 运行时生成物（脚本抓取/分析产出，随运行再生，不入版本库）----
+# 所有基金报告 / 净值缓存 / 雷达报告统一收在此目录
+基金报告/
+
+# ---- 用户配置（有意入库，不忽略，非隐私）----
+# funds.json                 自选基金清单（唯一权威源）
+# cat_colors.json            分类配色
+# categories.json            分类标签
+# radar_pool.json            低估雷达候选池
+# fund_config.example.json   估值阈值配置示例
+# fund_config.json           本地阈值覆盖（如不想入库可自行取消下面注释）

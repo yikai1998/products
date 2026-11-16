@@ -1347,37 +1347,120 @@ def run_fund(
 
 
 # ----------------------------------------------------------------------------
-# 盘中估值（自动抓“估算增长率%”替代手填预测）—— 数据源与养基宝/天天基金同源（东财）。
-# 注意：仅 A 股/境内基金在交易时段(约 9:30-15:00)有有效估值；QDII(纳指/标普/港股)白天无
-# 对应市场行情，估值无效或缺失，会自动跳过并说明原因。估值≠真实净值，仅供参考。
+# 盘中估值（自动抓“估算增长率%”替代手填预测）—— 双源降级：新浪财经（主）→ 东方财富（备）。
+# 东财批量接口盘后常回 {"Data":null}，akshare 内部直接下标访问会抛 TypeError，故改以新浪为主源。
+# 注意：仅在交易时段(约 9:30-15:00)发起请求。A 股/境内基金估值参考价值较高；
+# QDII(纳指/标普/港股)因对应市场时差不同，即使拿到估值也仅供参考。估值≠真实净值。
 # ----------------------------------------------------------------------------
+LAST_INTRADAY_REASON = ""   # 最近一次抓取的具体原因（空=成功），供 GUI 精确提示
+LAST_INTRADAY_SOURCE = ""   # 实际用上的数据源名，供 GUI 标注
+
+
+def _fetch_from_sina(codes: list, today, timeout: int = 15) -> tuple:
+    """备用源：新浪财经基金批量估值 https://hq.sinajs.cn/list=f_代码1,f_代码2...
+
+    东财的批量估值接口在盘后/故障时返回 {"Data":null}，akshare 会直接抛异常。
+    新浪这条接口一次可查多只，且响应里自带估值日期，能挡住上一交易日的残留。
+    响应为 GBK 编码的 JS 变量赋值，形如：
+      var hq_str_f_012414="招商中证白酒指数C,0.5818,0.6668,0.5771,2026-11-16,236.666";
+    字段依次为：名称 / 估算单位净值 / 估算累计净值 / 最新公布单位净值 / 估值日期 / 规模。
+    增长率 = (估算单位净值 ÷ 最新公布单位净值 − 1) × 100。
+
+    返回 (结果 dict, 说明字符串)：说明为空表示成功，否则是失败原因（供继续尝试东财）。
+    """
+    result = {}
+    try:
+        url = "https://hq.sinajs.cn/list=" + ",".join(f"f_{c}" for c in codes)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            "Referer": "https://finance.sina.com.cn/",
+        }
+        r = requests.get(url, headers=headers, timeout=timeout)
+        if r.status_code != 200:
+            return result, f"新浪接口 HTTP {r.status_code}"
+        r.encoding = "gbk"
+        for line in r.text.splitlines():
+            m = re.search(r'hq_str_f_(\d{6})="([^"]*)"', line)
+            if not m:
+                continue
+            p = m.group(2).split(",")
+            if len(p) < 5:
+                continue
+            # 关键：估值日期必须是今天。有些基金当日无估算，接口会原样返回上一交易日数据。
+            if p[4].strip() != today.isoformat():
+                continue
+            try:
+                est, base = float(p[1]), float(p[3])
+            except (TypeError, ValueError):
+                continue
+            if base <= 0:
+                continue
+            rate = (est / base - 1) * 100
+            if not (-100 < rate < 100):   # 极端脏值保护
+                continue
+            result[m.group(1)] = round(rate, 4)
+        if not result:
+            return result, "新浪接口未返回今日估算（数据源尚未更新或池内基金无估值）"
+        return result, ""
+    except Exception as e:  # noqa
+        return result, f"新浪接口异常：{type(e).__name__}: {str(e)[:100]}"
+
+
 def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
-    """批量抓取盘中估值增长率(%)。
+    """批量抓取盘中估值增长率(%)。双数据源，按序降级：
+
+      1) 新浪财经（主）：批量接口，盘后仍保留当日估算，自带估值日期可校验；
+      2) 东方财富（备）：akshare fund_value_estimation_em / fund_em_value_estimation。
 
     返回 {6位基金代码: 估算增长率(float, 如 3.71 表示涨3.71%)}；
-    抓不到 / 非交易时段 / QDII 无估值的基金不会出现在结果里。
-
-    兼容 akshare 各版本列名：
-      - 新接口 fund_value_estimation_em()：列为「基金代码/基金名称/<日期>-估算数据-估算增长率」
-      - 旧接口 fund_em_value_estimation()：列为「基金代码/估算增长率/基金名称」
-    列名含“估算增长率”的那一列即增长率（单位 %），按“包含匹配”定位，避免日期前缀漂移。
+    抓不到 / 非交易时段 / 当日无估算的基金不会出现在结果里（QDII 估值仅供参考）。
+    实际用上的源记在 LAST_INTRADAY_SOURCE，失败原因记在 LAST_INTRADAY_REASON。
     """
+    global LAST_INTRADAY_REASON, LAST_INTRADAY_SOURCE
+    LAST_INTRADAY_REASON = ""
+    LAST_INTRADAY_SOURCE = ""
     codes = [str(c).zfill(6) for c in codes]
     result = {}
     last_err = None
-    today = datetime.date.today()
+    now = datetime.datetime.now()
+    today = now.date()
     # 周末无交易：直接返回空，避免把上周五的残留估算当成“今日预测”填进去。
     if today.weekday() >= 5:
-        print("[盘中估值] 今天是周末，A股不开盘，无盘中估值，已跳过。")
+        LAST_INTRADAY_REASON = f"今天是周末（{today:%Y-%m-%d}），A股不开盘"
+        print(f"[盘中估值] {LAST_INTRADAY_REASON}，已跳过。")
         return result
-    for fn_name in ("fund_value_estimation_em", "fund_em_value_estimation"):
+    # 真正的交易时段判断：此前缺失，导致盘后接口异常被笼统提示成"不在时间范围"。
+    # 盘前/盘后直接跳过，既避免无谓请求，也能给出准确原因。
+    if not (datetime.time(9, 30) <= now.time() <= datetime.time(15, 0)):
+        LAST_INTRADAY_REASON = (
+            f"当前 {now:%H:%M} 不在 A股交易时段（9:30-15:00，现在为盘前或盘后）"
+        )
+        print(f"[盘中估值] {LAST_INTRADAY_REASON}，已跳过。")
+        return result
+
+    # ---- 源1：新浪财经 ----
+    sina_result, sina_note = _fetch_from_sina(codes, today, timeout)
+    if sina_result:
+        LAST_INTRADAY_SOURCE = "新浪财经"
+        print(f"[盘中估值] 新浪财经抓到 {len(sina_result)} 只当日估值。")
+        return sina_result
+
+    # ---- 源2：东方财富（akshare）----
+    available = [n for n in ("fund_value_estimation_em", "fund_em_value_estimation")
+                 if getattr(ak, n, None) is not None]
+    if not available:
+        LAST_INTRADAY_REASON = (f"新浪：{sina_note}；" if sina_note else "") + "当前 akshare 版本没有可用的估值接口"
+        print(f"[盘中估值] {LAST_INTRADAY_REASON}。")
+        return result
+    for fn_name in available:
         fn = getattr(ak, fn_name, None)
         if fn is None:
             continue
         try:
             df = fn()
             if df is None or getattr(df, "empty", True):
-                last_err = f"{fn_name} 返回空数据（可能非交易时段）"
+                last_err = f"{fn_name} 返回空数据（数据源暂不可用或接口限流）"
                 continue
             # 定位代码列
             code_col = None
@@ -1386,7 +1469,7 @@ def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
                     code_col = cand
                     break
             if code_col is None:
-                last_err = f"{fn_name} 无基金代码列"
+                last_err = f"{fn_name} 返回结构异常（找不到基金代码列）"
                 continue
             # 定位增长率列（按包含匹配）
             rate_col = None
@@ -1400,7 +1483,7 @@ def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
                         rate_col = c
                         break
             if rate_col is None:
-                last_err = f"{fn_name} 无估算增长率列"
+                last_err = f"{fn_name} 返回结构异常（找不到估算增长率列）"
                 continue
             # 关键：校验估算数据的“日期”必须是今天。东财列名形如
             #   “2026-05-12-估算数据-估算增长率”，非交易时段/周末接口常仍返回上一交易日
@@ -1409,8 +1492,8 @@ def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
             if m:
                 data_day = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
                 if data_day != today:
-                    last_err = (f"{fn_name} 估算数据日期为 {data_day}（非今日），"
-                                f"是非交易时段的上一交易日残留，已丢弃")
+                    last_err = (f"数据源返回的估算数据日期为 {data_day}（今日 {today}），"
+                                f"尚未更新到今天，已丢弃以免误填旧值")
                     continue
             work = df[[code_col, rate_col]].copy()
             work[code_col] = work[code_col].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
@@ -1423,13 +1506,22 @@ def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
                     continue
                 if fv == fv:  # 过滤 NaN
                     result[row[code_col]] = round(fv, 4)
+            # 成功，但自选池可能一只都没匹配上（QDII / 债券 / 场外基金常见）
+            if not result:
+                LAST_INTRADAY_REASON = (
+                    (f"新浪：{sina_note}；" if sina_note else "")
+                    + f"东财返回正常，但自选池 {len(codes)} 只均无当日估算"
+                    "（QDII / 债券 / 场外基金本就没有盘中估算，属正常）"
+                )
+            else:
+                LAST_INTRADAY_SOURCE = "东方财富"
             return result  # 成功（哪怕部分基金无估值）
         except Exception as e:  # noqa
-            last_err = f"{fn_name}: {type(e).__name__}: {e}"
+            last_err = f"{fn_name} 接口异常：{type(e).__name__}: {str(e)[:120]}"
             continue
-    # 两个接口都失败：返回空，由调用方提示原因（不抛异常，避免打断批量流程）
-    if last_err:
-        print(f"[盘中估值] 抓取失败：{last_err}")
+    # 所有源都失败：返回空，由调用方显示具体原因（不抛异常，避免打断批量流程）
+    LAST_INTRADAY_REASON = (f"新浪：{sina_note}；" if sina_note else "") + (last_err or "数据源暂不可用")
+    print(f"[盘中估值] 抓取失败：{LAST_INTRADAY_REASON}")
     return result
 
 
