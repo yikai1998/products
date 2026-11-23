@@ -582,10 +582,12 @@ class FundApp:
             "· 报告下方「持仓变化」：近 4 年季报披露的前十大重仓股，含行业占比走势、\n"
             "  最新季度明细(占比/行业/连续季数/环比)和季度换手。数据滞后且只含股票，\n"
             "  不含债券/可转债（债基的主要波动来源），占比合计远低于 100% 属正常。\n"
-            "  行业分类存在 股票行业.json；用 batch_holdings.py 可批量重抓全部历史。\n"
+            "  行业分类自动缓存到 股票行业.json，无需手改；缺哪只会自动抓，\n"
+            "  batch_holdings.py 可批量重抓全部历史与行业。\n"
             "· 指数/ETF联接/QDII 基金额外显示「跟踪指数成分股」：联接基金本身几乎不直接持股，\n"
             "  真正敞口是它复制的指数(A股用指数成分股带权重)或底层 ETF(QDII 从季报 PDF\n"
-            "  解析前十大海外股票，可能有个别误差)。映射在 指数成分股映射.json。\n\n"
+            "  解析前十大海外股票，可能有个别误差)。映射在 指数成分股映射.json；\n"
+            "  这是需要手工维护的配置：新增指数/QDII 基金时补一条，否则不显示成分股。\n\n"
             "【雷达 / 配置】\n"
             "· “📡 低估雷达”：扫描代表性基金候选池(可看到你没关注的)，按估值分位排序。\n"
             "· 阈值和回测参数可在项目目录建 fund_config.json 调整（见 fund_config.example.json）。"
@@ -670,7 +672,10 @@ class FundApp:
             costs.pop(code, None)
             analysis.save_costs(costs)
             self._refresh_tree()
-            self._log(f"已清除 {code} 的持仓成本（报告下次分析后不再显示盈亏）")
+            self._log(f"已清除 {code} 的持仓成本，正在用本地缓存刷新报告移除成本线（不联网）……")
+            self.worker = threading.Thread(target=self._run_worker, args=([code], True), daemon=True)
+            self.worker.start()
+            self.root.after(120, self._poll)
             return
         rec = {"cost": dlg.cost}
         if dlg.shares:
