@@ -11,3 +11,4 @@ requests>=2.28
 beautifulsoup4>=4.11
 lxml>=4.9
 demjson3>=3.0
+pypdf>=4.0  # QDII 底层 ETF 季报 PDF 解析前十大持仓
