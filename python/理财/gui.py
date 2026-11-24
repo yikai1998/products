@@ -558,15 +558,21 @@ class FundApp:
             "【预测 / 盘中估值】\n"
             "· “设今日预测”：对单只基金手填一个涨跌百分数，例如 -1 表示预计跌 1%。\n"
             "  它表示“相对最新实锤净值的今日估算”，脚本据此算出 T+1 预测净值画在图上。\n"
-            "· “抓盘中估值”：自动抓全池当日估算填入预测；优先新浪财经，失败自动切东方财富，\n"
-            "  日志会写明实际用上的数据源。\n"
-            "  仅交易日的 9:30-15:00 会去请求，周末/盘前/盘后直接跳过。抓不到时日志会写明具体原因\n"
-            "  （接口异常 / 数据未更新到今天 / 池内基金本就没有估算等），不再笼统说“不在时间范围”。\n"
+            "· “抓盘中估值”：只抓【当前勾选】的基金；A股指数/ETF 用成分股权重×实时股价自算，\n"
+            "  其余类型走新浪财经，失败自动切东方财富；日志会写明实际用上的数据源。\n"
+            "  自算是近似值（权重是季报/官网快照、基金有现金仓位和跟踪误差）；\n"
+            "  QDII / 主动 / 债基仍用官方估算，不参与自算。\n"
+            "  请求时段：A股 9:30-15:00（A股+港股），海外 21:00-次日 6:00（北京时间）；\n"
+            "  海外时段只抓正在交易的美股/欧洲 QDII，A股/港股已收盘不再填残留估算。\n"
+            "  其余时间/周末白天跳过；数据源返回旧日期的估算仍会被日期校验挡掉。\n"
+            "  抓不到时日志会写明具体原因（接口异常 / 数据未更新到今天 / 本就没有估算等）。\n"
             "  抓不到的自动预测会当作过期脏数据清除，不会让上交易日的旧估算留在图上；\n"
-            "  手工预测(你手填的)始终保留、不会被覆盖或清除。\n"
+            "  手工预测(你手填的)始终保留、不会被抓估值覆盖；填错了要自己点“设今日预测”清空。\n"
+            "· 报告顶部有「图中显示今日预测」勾选框：取消只隐藏图上的预测线/点，不删除预测数据；\n"
+            "  「全部」按钮只重置日期选区，不影响这个开关。\n"
             "· 预测不会永久留存：当晚真实净值公布后重新分析，预测会自动清除，图上恢复真实走势。\n\n"
             "【持仓成本 / 浮动盈亏】\n"
-            "· 单选一只基金点“💰 设成本”，填成本单价和可选份额，存到 持仓成本.json（不入库、不随 git 提交）。\n"
+            "· 单选一只基金点“💰 设成本”，填成本单价和可选份额，存到 持仓成本.json（小文件，会随 git 提交）。\n"
             "· 成本按【单位净值】填：申购按当日单位净值确认份额，成交价就是单位净值；\n"
             "  累计净值＝单位净值＋历史累计分红，只是画走势的业绩口径，不能当成本。\n"
             "· 列表新增「成本价 / 浮动盈亏」两列；报告顶部有成本与盈亏卡片，上图画一条紫色成本水平线。\n"
@@ -693,26 +699,28 @@ class FundApp:
         self.root.after(120, self._poll)
 
     def _fetch_intraday(self):
-        """自动抓全池盘中估值（新浪财经 → 东方财富双源降级），填入各基金“今日预测”。
-        仅交易时段发起请求；QDII 因时差其估值仅供参考。后台线程执行，不卡界面。"""
-        codes = [it["code"] for it in self.items]
+        """抓【当前勾选基金】的盘中估值，填入“今日预测”。
+        A股指数/ETF 用成分股权重自算，其余走新浪财经 → 东方财富双源降级。
+        仅交易时段发起请求；后台线程执行，不卡界面。"""
+        codes = self._active_selection()
         if not codes:
+            messagebox.showinfo("提示", "请先勾选要抓估值的基金（或选中行，可多选）")
             return
-        self._log("正在抓取盘中估值（东财数据源）……")
+        self._log(f"正在抓取所选 {len(codes)} 只基金的盘中估值（A股指数自算 + 新浪/东财）……")
 
         def work():
             try:
                 est = analysis.fetch_intraday_estimation(codes)
                 reason = getattr(analysis, "LAST_INTRADAY_REASON", "")
                 source = getattr(analysis, "LAST_INTRADAY_SOURCE", "")
-                self.q.put(("intraday", (est, reason, source)))
+                self.q.put(("intraday", (est, reason, source, codes)))
             except Exception as e:  # noqa
                 self.q.put(("intraday_err", str(e)))
 
         threading.Thread(target=work, daemon=True).start()
         self.root.after(120, self._poll)
 
-    def _apply_intraday(self, est, reason="", source=""):
+    def _apply_intraday(self, est, reason="", source="", codes=None):
         """把抓到的盘中估值增长率写入 predict_today。
 
         自动预测只认“本次抓到的当日数据”，其余一律视为过期脏数据清除：
@@ -721,8 +729,12 @@ class FundApp:
           - 手工预测（predict_manual=True）始终保留，既不覆盖也不清除。
         """
         got, skipped_manual, cleared = [], [], []
+        scope = set(codes) if codes else None
+        scope_n = len(scope) if scope else len(self.items)
         for it in self.items:
             code = it["code"]
+            if scope is not None and code not in scope:   # 只动本次勾选的基金
+                continue
             if it.get("predict_manual"):
                 if it.get("predict_today") is not None:
                     skipped_manual.append(code)
@@ -737,13 +749,13 @@ class FundApp:
         self._refresh_tree()
         if est:
             src = f"（数据源：{source}）" if source else ""
-            self._log(f"✔ 已填入 {len(got)} 只当日盘中估值{src}："
+            self._log(f"✔ 所选 {scope_n} 只中已填入 {len(got)} 只当日盘中估值{src}："
                       f"{', '.join(got[:8])}{' …' if len(got) > 8 else ''}")
         else:
             # 显示引擎给出的真实原因，不再用笼统的"不在时间范围"猜给用户
             why = reason or "数据源未返回当日估算（原因未知）"
-            self._log(f"⚠ 未抓到当日盘中估值：{why}；"
-                      "已清除所有“自动填入”的过期预测脏数据，手工预测保留。")
+            self._log(f"⚠ 所选 {scope_n} 只未抓到当日盘中估值：{why}；"
+                      "已清除其中“自动填入”的过期预测脏数据，手工预测保留。")
         if cleared:
             self._log(f"🧹 已清除 {len(cleared)} 只过期自动预测（脏数据）："
                       f"{', '.join(cleared[:8])}{' …' if len(cleared) > 8 else ''}")
@@ -816,7 +828,8 @@ class FundApp:
                     code, err = payload
                     self._log(f"✘ {code} 失败：{err}")
                 elif kind == "intraday":
-                    self._apply_intraday(payload[0], payload[1], payload[2])
+                    self._apply_intraday(payload[0], payload[1], payload[2],
+                                         payload[3] if len(payload) > 3 else None)
                 elif kind == "intraday_err":
                     self._log(f"✘ 盘中估值抓取失败：{payload}")
                     # 抓取异常同样会留下过期的自动预测脏数据 → 一并清除

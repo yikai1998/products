@@ -166,6 +166,22 @@ def _lookup_fund_name(code: str) -> str:
     return ""
 
 
+def _lookup_fund_type(code: str) -> str:
+    """从 funds.json / radar_pool.json 按代码查基金类型。"""
+    for fn in ("funds.json", "radar_pool.json"):
+        path = os.path.join(BASE_DIR, fn)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for it in json.load(f):
+                    if str(it.get("code", "")).zfill(6) == code:
+                        return str(it.get("type", ""))
+        except Exception:
+            pass
+    return ""
+
+
 def _safe_folder_name(s: str) -> str:
     """去掉 Windows/macOS 文件名非法字符，避免新建目录失败。"""
     return re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", s).strip().rstrip(".")
@@ -1558,6 +1574,14 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
         "  document.getElementById('fromDate').value='';"
         "  document.getElementById('toDate').value='';"
         "}"
+        "function togglePredict(){"
+        "  var on = document.getElementById('showPredict').checked;"
+        "  try { navChart.dispatchAction({type: on?'legendSelect':'legendUnSelect', name:'今日预测'}); } catch(e){}"
+        "  try { valChart.dispatchAction({type: on?'legendSelect':'legendUnSelect', name:'今日预测'}); } catch(e){}"
+        "}"
+        # 有预测才显示开关；默认勾选=显示，取消勾选只是隐藏图上的预测线/点，不删除数据
+        "document.getElementById('predToggle').style.display = PREDICT ? '' : 'none';"
+        "document.getElementById('showPredict').checked = !!PREDICT;"
         "window.addEventListener('resize', function(){ navChart.resize(); valChart.resize(); });"
     )
     chart_js = chart_js.replace("__DATA__", json.dumps(data, ensure_ascii=False))
@@ -1655,6 +1679,9 @@ def _save_interactive_html(df, fund_code, name, fund_type, signal, valuation, dr
   <input type="date" id="toDate" min="{first_date}" max="{last_date}">
   <button onclick="applyRange()">应用</button>
   <button onclick="resetRange()">全部</button>
+  <label id="predToggle" style="margin-left:14px; display:none;">
+    <input type="checkbox" id="showPredict" checked onchange="togglePredict()"> 图中显示今日预测
+  </label>
   <span class="hint">填日期后点应用；或拖下方滑块选区间（滚轮已关闭缩放）</span>
 </div>
 <div class="chart-box"><div id="navChart"></div></div>
@@ -1812,6 +1839,96 @@ LAST_INTRADAY_REASON = ""   # 最近一次抓取的具体原因（空=成功）�
 LAST_INTRADAY_SOURCE = ""   # 实际用上的数据源名，供 GUI 标注
 
 
+def estimate_from_constituents(codes: list, today=None, timeout: int = 15) -> dict:
+    """用指数成分股权重 + 新浪实时股价，自算 A股指数/ETF 的盘中估算涨幅(%)。
+
+    只处理 `指数成分股映射.json` 里 src=cs/sina、且本地 `指数成分股.csv` 有有效权重的基金；
+    QDII（季报前十大、时差）、主动基金、无权重快照一律跳过，交给新浪/东财的原基金估算。
+    公式：Σ(成分股权重 × 成分股实时涨跌幅) / Σ权重。
+    注意：权重是季报/指数官网快照、基金有现金仓位与跟踪误差，结果是近似值，不是官方估值。
+    """
+    result = {}
+    today = today or datetime.date.today()
+    idx_map = load_index_map()
+    eligible = {}
+    for c in {str(x).zfill(6) for x in codes}:
+        m = idx_map.get(c)
+        if not m or m.get("src") not in ("cs", "sina"):
+            continue
+        csv_path = os.path.join(resolve_fund_dir(c), "指数成分股.csv")
+        if not os.path.exists(csv_path):
+            continue
+        try:
+            df = pd.read_csv(csv_path, encoding="utf-8-sig")[["股票代码", "权重"]].copy()
+            df["股票代码"] = (df["股票代码"].astype(str)
+                               .str.replace(r"\.0$", "", regex=True).str.zfill(6))
+            df["权重"] = pd.to_numeric(df["权重"], errors="coerce")
+        except Exception:  # noqa
+            continue
+        df = df.dropna(subset=["权重"])
+        df = df[df["权重"] > 0]
+        if not df.empty:
+            eligible[c] = df
+
+    if not eligible:
+        return result
+
+    # 汇总所有成分股代码，去重后批量拉新浪实时行情（GBK，字段 2=昨收 3=现价 30=日期）
+    all_codes = sorted({c for df in eligible.values() for c in df["股票代码"]})
+
+    def _sym(c):
+        return ("sh" if c[0] in "56" else "bj" if c[0] in "489" else "sz") + c
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Referer": "https://finance.sina.com.cn/",
+    }
+    quotes = {}
+    for i in range(0, len(all_codes), 400):
+        chunk = all_codes[i:i + 400]
+        try:
+            r = requests.get("https://hq.sinajs.cn/list=" + ",".join(_sym(c) for c in chunk),
+                             headers=headers, timeout=timeout)
+            if r.status_code != 200:
+                continue
+            r.encoding = "gbk"
+            for line in r.text.splitlines():
+                m = re.search(r'hq_str_(?:sh|sz|bj)(\d{6})="([^"]*)"', line)
+                if not m:
+                    continue
+                p = m.group(2).split(",")
+                # 日期必须是今天，否则是上一交易日残留，不拿来算实时估值
+                if len(p) < 32 or p[30].strip() != today.isoformat():
+                    continue
+                try:
+                    cur, prev = float(p[3]), float(p[2])
+                except (TypeError, ValueError):
+                    continue
+                if cur <= 0 or prev <= 0:
+                    continue                      # 停牌 / 无报价
+                rate = (cur / prev - 1) * 100
+                if not (-30 < rate < 30):          # A股涨跌停外的脏值保护
+                    continue
+                quotes[m.group(1)] = rate
+        except Exception as e:  # noqa
+            print(f"[成分股自算] 新浪行情请求失败：{type(e).__name__}: {str(e)[:100]}")
+            continue
+
+    for code, df in eligible.items():
+        valid = df[df["股票代码"].isin(quotes)]
+        if valid.empty:
+            continue
+        wsum = float(valid["权重"].sum())
+        if wsum <= 0:
+            continue
+        est = float((valid["权重"] * valid["股票代码"].map(quotes)).sum() / wsum)
+        result[code] = round(est, 4)
+    if result:
+        print(f"[成分股自算] {len(result)} 只 A股指数基金用成分股权重算出估值。")
+    return result
+
+
 def _fetch_from_sina(codes: list, today, timeout: int = 15) -> tuple:
     """备用源：新浪财经基金批量估值 https://hq.sinajs.cn/list=f_代码1,f_代码2...
 
@@ -1863,6 +1980,25 @@ def _fetch_from_sina(codes: list, today, timeout: int = 15) -> tuple:
         return result, f"新浪接口异常：{type(e).__name__}: {str(e)[:100]}"
 
 
+def _in_a_share_session(now) -> bool:
+    """A股交易时段：工作日 9:30-15:00。"""
+    return now.weekday() < 5 and datetime.time(9, 30) <= now.time() <= datetime.time(15, 0)
+
+
+def _in_overseas_session(now) -> bool:
+    """海外市场估值时段（北京时间，放宽边界以兼容冬/夏令时）：
+    周一至周四 21:00-次日 6:00，周五 21:00 之后，周六 6:00 之前；周日整日跳过。
+    QDII 基金在这段时间才可能拿到当日海外估算。"""
+    wd, t = now.weekday(), now.time()
+    if wd in (0, 1, 2, 3):
+        return t >= datetime.time(21, 0) or t <= datetime.time(6, 0)
+    if wd == 4:
+        return t >= datetime.time(21, 0)
+    if wd == 5:
+        return t <= datetime.time(6, 0)
+    return False
+
+
 def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
     """批量抓取盘中估值增长率(%)。双数据源，按序降级：
 
@@ -1881,25 +2017,56 @@ def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
     last_err = None
     now = datetime.datetime.now()
     today = now.date()
-    # 周末无交易：直接返回空，避免把上周五的残留估算当成“今日预测”填进去。
-    if today.weekday() >= 5:
-        LAST_INTRADAY_REASON = f"今天是周末（{today:%Y-%m-%d}），A股不开盘"
+    # 双时段：A股 9:30-15:00；海外（QDII）21:00-次日 6:00（北京时间，放宽以兼容冬/夏令时）。
+    # 周末白天直接跳过，避免把上周五的残留估算当成“今日预测”填进去。
+    if today.weekday() >= 5 and not _in_overseas_session(now):
+        LAST_INTRADAY_REASON = f"今天是周末（{today:%Y-%m-%d}），A股与海外市场都不在交易时段"
         print(f"[盘中估值] {LAST_INTRADAY_REASON}，已跳过。")
         return result
-    # 真正的交易时段判断：此前缺失，导致盘后接口异常被笼统提示成"不在时间范围"。
-    # 盘前/盘后直接跳过，既避免无谓请求，也能给出准确原因。
-    if not (datetime.time(9, 30) <= now.time() <= datetime.time(15, 0)):
+    if not (_in_a_share_session(now) or _in_overseas_session(now)):
         LAST_INTRADAY_REASON = (
-            f"当前 {now:%H:%M} 不在 A股交易时段（9:30-15:00，现在为盘前或盘后）"
+            f"当前 {now:%H:%M} 不在估值时段"
+            "（A股 9:30-15:00 / 海外 21:00-次日 6:00，北京时间）"
         )
         print(f"[盘中估值] {LAST_INTRADAY_REASON}，已跳过。")
         return result
 
+    # 海外时段只处理正在交易的美股/欧洲 QDII：A股和港股此时已收盘，
+    # 新浪 f_ 接口仍留着当日收盘的残留估算，抓回来会被误填成“实时预估”。
+    if not _in_a_share_session(now):
+        overseas = []
+        for c in codes:
+            typ, nm = _lookup_fund_type(c), _lookup_fund_name(c)
+            if not typ.startswith("QDII"):
+                continue
+            if any(k in nm for k in ("恒生", "港股", "香港", "H股")):
+                continue                      # 港股夜里休市
+            overseas.append(c)
+        if not overseas:
+            LAST_INTRADAY_REASON = (
+                "当前为海外时段，所选基金均为 A股/港股（已收盘），"
+                "没有正在交易的海外市场基金，故不抓估值"
+            )
+            print(f"[盘中估值] {LAST_INTRADAY_REASON}。")
+            return result
+        codes = overseas
+
+    # ---- 源0：A股指数/ETF 用成分股权重自算（其余基金留给下面的官方估算源）----
+    # 海外时段只走官方估算，不用 A股收盘价去“假装”实时自算。
+    self_est = (estimate_from_constituents(codes, today, timeout=timeout)
+                if _in_a_share_session(now) else {})
+    rest = [c for c in codes if c not in self_est]
+    if not rest:
+        LAST_INTRADAY_SOURCE = f"成分股自算({len(self_est)}只)"
+        return self_est
+
     # ---- 源1：新浪财经 ----
-    sina_result, sina_note = _fetch_from_sina(codes, today, timeout)
+    sina_result, sina_note = _fetch_from_sina(rest, today, timeout)
+    if self_est:
+        sina_result.update(self_est)
     if sina_result:
-        LAST_INTRADAY_SOURCE = "新浪财经"
-        print(f"[盘中估值] 新浪财经抓到 {len(sina_result)} 只当日估值。")
+        LAST_INTRADAY_SOURCE = ("成分股自算 + 新浪财经" if self_est else "新浪财经")
+        print(f"[盘中估值] 抓到 {len(sina_result)} 只当日估值（其中成分股自算 {len(self_est)} 只）。")
         return sina_result
 
     # ---- 源2：东方财富（akshare）----
@@ -1963,18 +2130,26 @@ def fetch_intraday_estimation(codes: list, timeout: int = 30) -> dict:
                 if fv == fv:  # 过滤 NaN
                     result[row[code_col]] = round(fv, 4)
             # 成功，但自选池可能一只都没匹配上（QDII / 债券 / 场外基金常见）
+            if self_est:
+                result.update(self_est)
             if not result:
                 LAST_INTRADAY_REASON = (
                     (f"新浪：{sina_note}；" if sina_note else "")
-                    + f"东财返回正常，但自选池 {len(codes)} 只均无当日估算"
+                    + f"东财返回正常，但自选池 {len(rest)} 只均无当日估算"
                     "（QDII / 债券 / 场外基金本就没有盘中估算，属正常）"
                 )
             else:
-                LAST_INTRADAY_SOURCE = "东方财富"
+                LAST_INTRADAY_SOURCE = ("成分股自算 + 东方财富" if self_est else "东方财富")
             return result  # 成功（哪怕部分基金无估值）
         except Exception as e:  # noqa
             last_err = f"{fn_name} 接口异常：{type(e).__name__}: {str(e)[:120]}"
             continue
+    # 官方源全失败，但成分股自算有结果：仍返回自算值，并注明原因
+    if self_est:
+        LAST_INTRADAY_SOURCE = f"成分股自算({len(self_est)}只)"
+        LAST_INTRADAY_REASON = ("官方源抓取失败（" + (last_err or "数据源暂不可用") + "），"
+                                f"已用成分股自算 {len(self_est)} 只")
+        return self_est
     # 所有源都失败：返回空，由调用方显示具体原因（不抛异常，避免打断批量流程）
     LAST_INTRADAY_REASON = (f"新浪：{sina_note}；" if sina_note else "") + (last_err or "数据源暂不可用")
     print(f"[盘中估值] 抓取失败：{LAST_INTRADAY_REASON}")
